@@ -2,16 +2,16 @@
 
 import os
 
-DB_PATH = os.path.expanduser("~/.openclaw/claw-monitor/metrics.db")
+DB_PATH = os.environ.get("CM_DB_PATH", os.path.expanduser("~/.openclaw/claw-monitor/metrics.db"))
 
 # Activity threshold: write to metrics only when any OpenClaw PID CPU% exceeds this
 ACTIVITY_THRESHOLD_PCT = 1.0
 
 # Fast loop interval (seconds)
-FAST_LOOP_INTERVAL = 1
+FAST_LOOP_INTERVAL = int(os.environ.get("CM_FAST_LOOP_INTERVAL_S", "1"))
 
 # Slow loop interval (seconds)
-SLOW_LOOP_INTERVAL = 60
+SLOW_LOOP_INTERVAL = int(os.environ.get("CM_SLOW_LOOP_INTERVAL_S", "60"))
 
 # Retention: delete metrics older than this many days
 RETENTION_DAYS = 14

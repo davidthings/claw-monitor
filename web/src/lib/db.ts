@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import os from "os";
 
-const DB_PATH = path.join(os.homedir(), ".openclaw", "claw-monitor", "metrics.db");
+const DB_PATH = process.env.CM_DB_PATH ?? path.join(os.homedir(), ".openclaw", "claw-monitor", "metrics.db");
 
 let _db: Database.Database | null = null;
 
