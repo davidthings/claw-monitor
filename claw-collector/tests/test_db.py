@@ -9,8 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 def test_open_db_creates_directory_and_sets_wal(tmp_path, monkeypatch):
     import config
+    import db as db_mod
     db_path = str(tmp_path / "sub" / "dir" / "test.db")
     monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
     from db import open_db
     conn = open_db()
     assert os.path.isdir(os.path.dirname(db_path))
@@ -21,8 +23,10 @@ def test_open_db_creates_directory_and_sets_wal(tmp_path, monkeypatch):
 
 def test_open_db_sets_busy_timeout(tmp_path, monkeypatch):
     import config
+    import db as db_mod
     db_path = str(tmp_path / "test.db")
     monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
     from db import open_db
     conn = open_db()
     timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
