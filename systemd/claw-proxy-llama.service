@@ -1,0 +1,15 @@
+[Unit]
+Description=claw-proxy Llama (port 14002)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/david/work/claw-monitor/claw-proxy
+ExecStart=/usr/bin/python3 /home/david/work/claw-monitor/claw-proxy/proxy_llama.py
+Restart=on-failure
+RestartSec=5
+Environment=CM_PROXY_LLAMA_PORT=14002
+EnvironmentFile=-/home/david/.config/claw-proxy/env
+
+[Install]
+WantedBy=default.target

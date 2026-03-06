@@ -1,0 +1,15 @@
+[Unit]
+Description=claw-proxy Anthropic (port 14000)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/david/work/claw-monitor/claw-proxy
+ExecStart=/usr/bin/python3 /home/david/work/claw-monitor/claw-proxy/proxy_anthropic.py
+Restart=on-failure
+RestartSec=5
+Environment=CM_PROXY_ANTHROPIC_PORT=14000
+EnvironmentFile=-/home/david/.config/claw-proxy/env
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=claw-proxy OpenAI (port 14001)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/david/work/claw-monitor/claw-proxy
+ExecStart=/usr/bin/python3 /home/david/work/claw-monitor/claw-proxy/proxy_openai.py
+Restart=on-failure
+RestartSec=5
+Environment=CM_PROXY_OPENAI_PORT=14001
+EnvironmentFile=-/home/david/.config/claw-proxy/env
+
+[Install]
+WantedBy=default.target
