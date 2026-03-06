@@ -1,0 +1,14 @@
+[Unit]
+Description=claw-collector: OpenClaw resource monitor daemon
+After=network.target
+
+[Service]
+Type=simple
+Nice=10
+ExecStart=/usr/bin/python3 %h/work/claw-monitor/claw-collector/collector.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
