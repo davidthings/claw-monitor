@@ -319,4 +319,47 @@ Dashboard gap interpretation:
 
 ---
 
+## 2026-03-06 — Full Implementation (07:45–08:00 PST)
+
+**Who did what:** David triggered implementation. Claude Code built all phases. claw-monitor-builder managed the session.
+
+### Implementation Summary
+
+All 6 phases completed in a single session:
+
+| Phase | What | Result |
+|---|---|---|
+| 1 | schema.sql + DB init | 7 tables, WAL mode, at ~/.openclaw/claw-monitor/metrics.db |
+| 2 | claw-collector/ Python daemon | 7 modules: collector.py, db.py, pid_tracker.py, net_tracker.py, gpu_tracker.py, disk_tracker.py, config.py |
+| 3 | scripts/tag.sh + register-tool.sh | Fire-and-forget shell helpers, always exit 0 |
+| 4 | web/ Next.js app | 8 API routes, 11 components, 6 pages, SSE streaming, Tailscale IP guard |
+| 5 | systemd units | claw-collector.service + claw-web.service installed |
+| 6 | Build + deploy | npm install, npm run build, both services active |
+
+### Build Issues Resolved
+
+1. **next.config.ts not supported** — Next.js 14 requires .mjs, not .ts
+2. **ES5 target + Set iteration** — Changed tsconfig target to es2017
+3. **Token summary type inference** — Refactored to avoid spread + Record type clash
+4. **Static API route caching** — Added `export const dynamic = "force-dynamic"` to registry route
+
+### Verification
+
+- Collector found gateway PID 35324, auto-registered 58+ processes
+- Metrics flowing: CPU, memory, net, GPU data writing to DB
+- All API endpoints verified: tags, tokens, registry, metrics, disk
+- Both systemd services active (running)
+- Dashboard accessible at http://dw-asus-linux.tail3eef35.ts.net:7432
+
+### Status
+- [x] Phase 1: Schema + DB
+- [x] Phase 2: Collector
+- [x] Phase 3: Scripts
+- [x] Phase 4: Web app
+- [x] Phase 5: systemd units
+- [x] Phase 6: Build + deploy
+- [x] Full stack running
+
+---
+
 *Future entries appended below as the project progresses.*
