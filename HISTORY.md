@@ -645,4 +645,80 @@ Integration tests were largely bypassing the actual HTTP API and manipulating SQ
 
 ---
 
+## 2026-03-06 — Bug: register-tool.sh missing `tokens` sub-command (12:26 PST)
+
+**Diagnosis:** Token rate always shows 0. DB has only 1 token event (the integration test entry). Root cause: `register-tool.sh` has no `tokens` sub-command. INSTRUCTIONS.md describes `register-tool.sh tokens <tool> <model> <in> <out>` but the script interprets "tokens" as a PID and silently fails. Nothing ever reaches /api/tokens.
+
+**Fix approach (TDD):**
+1. Write failing test that exercises the full token pathway: `register-tool.sh tokens` → POST /api/tokens → DB row → /api/tokens/rate returns non-zero
+2. Run test, confirm it fails
+3. Add `tokens` sub-command to `register-tool.sh`
+4. Run test again, confirm it passes
+5. Update TEST_PLAN.md §0.4 to mandate this TDD approach for all future bug fixes
+
+---
+
+## 2026-03-06 — claw-proxy Implementation (13:08 PST)
+
+**Who did what:** David approved. DavidBot spawning claw-monitor-builder to implement per PROXY_PLAN.md.
+
+### Scope
+- Phase 1: All three proxies (Anthropic, OpenAI, Llama) + full test suite
+- Phase 2: Manual curl verification against all three
+- Phase 3+4: Anthropic live switchover — SEPARATE SESSION, David present
+
+### Participants
+- **DavidBot** — orchestrator; HISTORY author
+- **claw-monitor-builder** — subagent directing Claude Code
+- **Claude Code** — implements claw-proxy/ directory
+
+---
+
+## 2026-03-06 — End of Day Summary (14:06 PST)
+
+### What was completed today
+
+| Item | Status |
+|------|--------|
+| GitHub fine-grained PAT for claw-monitor repo | ✅ Done |
+| TEST_PLAN.md — full test plan (3 rounds of review) | ✅ Done |
+| All tests implemented (11 groups, ~173 tests) | ✅ Done |
+| Integration tests reworked — real HTTP server, fully self-contained | ✅ Done |
+| `run-tests.sh` one-liner (unit + integration) | ✅ Done |
+| `CM_PORT` placeholder throughout docs | ✅ Done |
+| Bug fix: `register-tool.sh tokens` sub-command missing (TDD) | ✅ Done |
+| TEST_PLAN.md §0.4 — TDD-first mandate for bug fixes | ✅ Done |
+| Overview page redesign (spec + implementation) | ✅ Done |
+| `docs/UI_SPEC.md` — Overview page spec | ✅ Done |
+| `docs/PROXY_PLAN.md` — claw-proxy plan (3 providers) | ✅ Done |
+| claw-proxy implementation — Anthropic, OpenAI, Llama | ✅ Done |
+| All 52 proxy tests passing | ✅ Done |
+| Systemd units installed (not started) | ✅ Done |
+
+### Stopping point — What's next
+
+**Next session priority: Phase 3 & 4 — Live Anthropic proxy switchover**
+This must be done with David present and watching Signal.
+Full procedure in `docs/PROXY_PLAN.md`.
+
+Steps:
+1. Verify `source ~/.bashrc` loads `ANTHROPIC_API_KEY`
+2. Start proxy: `systemctl --user start claw-proxy-anthropic`
+3. Manual curl test through proxy → verify token event in DB
+4. Arm 2-minute dead man's switch (shell bg job)
+5. Apply one-line config change in OpenClaw (`anthropic.baseUrl = http://localhost:14000`)
+6. Restart OpenClaw gateway
+7. David sends a test message — verify response + tok/min appears in dashboard
+8. Cancel dead man's switch
+9. Enable proxy service for auto-start: `systemctl --user enable claw-proxy-anthropic`
+
+**After that:**
+- Wire up OpenAI proxy (same process, shorter since Anthropic already proven)
+- Wire up Llama proxy (only when Qwen server is running)
+- UI work: remaining pages (Metrics, Disk, Tokens, Processes all need review/redesign)
+- Consider: tag overlay on Metrics page (same as Overview)
+- Consider: Tokens page — show cost breakdown, historical graph
+
+---
+
 *Future entries appended below as the project progresses.*
