@@ -610,4 +610,18 @@ Tests implemented one file/group at a time. For each group: implement → run �
 
 ---
 
+## 2026-03-06 — Integration Test Rework: Real HTTP Server (10:52 PST)
+
+**Who did what:** David reviewed integration test approach. DavidBot diagnosed the gap — tests were hitting DB directly, not via HTTP. Spawned claw-monitor-builder to fix.
+
+### Problem
+Integration tests were largely bypassing the actual HTTP API and manipulating SQLite directly. Not a real integration test — a code bug in an API route would go undetected. Also, `run-tests.sh --integration` was starting services externally rather than having the test suite manage its own lifecycle.
+
+### Requirements
+- Integration tests must be fully self-contained — start their own web server + collector, make real HTTP requests, tear down cleanly
+- Must run safely alongside the production instance (different DB path, random port)
+- No manual service management required — `./run-tests.sh --integration` does everything
+
+---
+
 *Future entries appended below as the project progresses.*

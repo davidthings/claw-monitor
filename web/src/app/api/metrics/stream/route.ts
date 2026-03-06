@@ -11,6 +11,9 @@ export async function GET() {
       let lastTs = Math.floor(Date.now() / 1000);
       let pingCounter = 0;
 
+      // Send an initial comment immediately so HTTP headers are flushed to the client
+      controller.enqueue(encoder.encode(": connected\n\n"));
+
       const interval = setInterval(() => {
         try {
           pingCounter++;
