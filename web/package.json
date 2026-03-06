@@ -1,0 +1,25 @@
+{
+  "name": "claw-monitor-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 7432",
+    "build": "next build",
+    "start": "next start -p 7432 -H 0.0.0.0"
+  },
+  "dependencies": {
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "@radix-ui/themes": "^3.1.0",
+    "recharts": "^2.12.0",
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "typescript": "^5.4.0"
+  }
+}
