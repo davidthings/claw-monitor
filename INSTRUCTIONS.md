@@ -1,7 +1,7 @@
 # claw-monitor — Instructions
 
 > **Port placeholder:** `CM_PORT` is used throughout this document in place of the actual port number.
-> The default port is `CM_PORT`. Set the `CM_PORT` environment variable to override.
+> The default port is `7432`. Set the `CM_PORT` environment variable to override.
 > Configured in: `web/next.config.mjs` (Next.js) and `web/claw-web.service` (systemd).
 
 ---
@@ -19,7 +19,7 @@ It tracks:
 - **Tokens** — LLM token consumption per tool call (reported by clawbot)
 - **Tags** — work-type annotations so resource charts can be interpreted in context
 
-Data is stored in SQLite. A Next.js dashboard is served on a permanent port (default **CM_PORT**) accessible from any Tailscale-linked device.
+Data is stored in SQLite. A Next.js dashboard is served on a permanent port (`CM_PORT`) accessible from any Tailscale-linked device.
 
 The collector is activity-gated: it writes data only when OpenClaw is active, so idle periods (overnight, etc.) produce no rows and no overhead. A single-row liveness table is updated every 60 seconds so the dashboard can distinguish intentional idle gaps from collector downtime.
 
