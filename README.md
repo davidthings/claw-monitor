@@ -2,7 +2,7 @@
 
 > **Status: PLANNING PHASE — No code written yet. Awaiting David's review before implementation.**
 
-A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, network I/O, and token consumption attributable to the OpenClaw process tree — every 10 seconds — and exposes a real-time dashboard accessible from any Tailscale-linked device.
+A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, network I/O, and token consumption attributable to the OpenClaw process tree — at an **adaptive polling interval** that slows when OpenClaw is idle and quickens when it's busy — and exposes a real-time dashboard accessible from any Tailscale-linked device.
 
 ---
 
@@ -10,7 +10,7 @@ A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, netw
 
 1. **Attribution**: Know exactly how much of the machine's CPU, RAM, and network is consumed by OpenClaw (gateway, headless Chrome, agents, OS utilities) vs. everything else.
 2. **Token visibility**: Track LLM token usage per external tool call, registered dynamically as tools are used.
-3. **Low overhead**: Collector runs at low priority (nice +10), polls every 10s, fire-and-forget.
+3. **Low overhead**: Collector runs at low priority (nice +10), adaptive poll interval (5s–60s based on activity), fire-and-forget.
 4. **Persistent dashboard**: Available 24/7 on a fixed Tailscale-reachable port.
 5. **Dynamic registration**: OpenClaw can register new PIDs/tools with a single lightweight API call — no continuous overhead.
 
@@ -31,11 +31,12 @@ A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, netw
 │  ├── /api/tokens            ← token event ingestion     │
 │  └── /api/tokens/summary    ← aggregate token usage     │
 ├─────────────────────────────────────────────────────────┤
-│  claw-collector  (Python daemon, nice +10, every 10s)   │
-│  ├── reads /proc (CPU, mem per PID; net from /proc/net) │
-│  ├── resolves PID→group via registry                    │
-│  ├── verifies PID validity (detects reuse via comm)     │
-│  └── writes to SQLite (WAL mode)                        │
+│  claw-collector  (Python daemon, nice +10, 5s–60s adaptive) │
+│  ├── reads /proc (CPU, mem per PID; net from /proc/net)    │
+│  ├── resolves PID→group via registry                       │
+│  ├── verifies PID validity (detects reuse via comm)        │
+│  ├── self-adjusts interval based on gateway CPU%           │
+│  └── writes to SQLite (WAL mode, with ts per sample)       │
 ├─────────────────────────────────────────────────────────┤
 │  SQLite DB  (~/.openclaw/claw-monitor/metrics.db)       │
 │  ├── metrics           (time-series: cpu/mem by group)  │
@@ -73,9 +74,33 @@ A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, netw
 ### 1. `claw-collector/` — Python daemon
 
 - **Language:** Python 3 + psutil + sqlite3 (stdlib)
-- **Poll interval:** 10 seconds
+- **Poll interval:** Adaptive — 5s to 60s depending on OpenClaw activity (see below)
 - **Priority:** `nice +10` (SCHED_OTHER, low priority)
 - **Process manager:** `claw-collector.service` (systemd user scope)
+
+#### Adaptive Polling
+
+The collector self-adjusts its poll interval by observing the openclaw-gateway process's own CPU% from the previous sample. No API calls, no coupling to OpenClaw — purely self-contained.
+
+| Gateway CPU% (prev sample) | Consecutive idle samples | Next interval |
+|---|---|---|
+| > 40% | any | **5s** (heavy activity) |
+| 15–40% | any | **10s** (active) |
+| 2–15% | any | **30s** (light / heartbeat) |
+| < 2% | 1–2 | **30s** (transitioning to idle) |
+| < 2% | 3+ | **60s** (deep idle) |
+
+**Implications for stored data:**
+- Timestamps are stored precisely (unix epoch, second resolution)
+- Intervals between rows will vary — dashboard uses a **time-scale x-axis** (not sequential index)
+- Sparse idle-period gaps are displayed honestly as time gaps in charts
+- A `sample_interval_s` column records actual elapsed seconds per sample, enabling the dashboard to show a "data density" indicator (e.g., "60s intervals" vs "5s intervals")
+
+**Schema addition:**
+```sql
+ALTER TABLE metrics ADD COLUMN sample_interval_s INTEGER;
+-- Actual elapsed seconds since previous sample (not the target interval)
+```
 
 #### Collector Core Loop
 
@@ -86,8 +111,9 @@ On startup:
   3. Bootstrap: auto-discover openclaw-gateway PID via /proc/*/cmdline scan
      Walk child tree via /proc/<pid>/children to auto-register all children
   4. Load process_registry into memory
+  5. Set initial interval = 30s, idle_count = 0
 
-Every 10s:
+Every [adaptive interval]:
   1. Reload process_registry (small SELECT, catches new API registrations)
   2. For each registered PID:
      a. Check /proc/<pid> exists → if not, mark unregistered in DB
@@ -99,10 +125,18 @@ Every 10s:
   3. Aggregate per group: sum CPU%, sum RSS
   4. Read /proc/net/dev → compute delta for net in/out bytes
   5. INSERT one row per group into metrics (no net columns)
+     Include sample_interval_s = actual elapsed since last tick
   6. INSERT one row with grp='machine' containing net_in_kb, net_out_kb
-  7. Daily (first tick after midnight):
+  7. Compute next interval:
+     - gateway_cpu = CPU% for openclaw-gateway from step 2
+     - if gateway_cpu > 40%: interval = 5, idle_count = 0
+     - elif gateway_cpu > 15%: interval = 10, idle_count = 0
+     - elif gateway_cpu > 2%: interval = 30, idle_count = 0
+     - else: idle_count += 1; interval = 60 if idle_count >= 3 else 30
+  8. Daily (first tick after midnight):
      - INSERT aggregated rows into metrics_daily
      - DELETE FROM metrics WHERE ts < (now - 14 days)
+  9. Sleep for computed interval
 
 On SIGTERM: clean shutdown, close DB
 ```
@@ -119,7 +153,7 @@ On SIGTERM: clean shutdown, close DB
 
 #### Known Limitations
 
-- **PID churn**: Processes that live and die within a single 10s window are missed entirely. Acceptable — short-lived processes contribute minimal resource usage. Token tracking is unaffected (handled via API).
+- **PID churn**: Processes that live and die within a single poll window are missed entirely (window is 5–60s depending on activity level). Acceptable — short-lived processes contribute minimal resource usage. Token tracking is unaffected (handled via API).
 - **No per-PID network I/O**: Machine-level net only. Feasible improvement in v2 (cgroups or eBPF).
 - **First sample after registration**: CPU% is NULL because delta calculation requires two readings.
 

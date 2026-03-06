@@ -125,4 +125,50 @@ Claude Code reviewed the initial architecture and provided detailed analysis, co
 
 ---
 
+## 2026-03-06 — Adaptive Polling Requirement Added
+
+### Context
+David raised a new requirement at 06:47 PST (before implementation started): rather than a fixed 10s poll interval, the collector should use an **adaptive interval** that slows during idle periods and speeds up during active ones. Goal: avoid an "absolute mountain of data" while keeping granularity where it matters.
+
+### Design Discussion
+
+**Signaling mechanism options considered:**
+1. **Self-detecting** (chosen) — collector observes openclaw-gateway CPU% from the previous sample to decide the next interval. Zero coupling, zero overhead on OpenClaw, no new API endpoints.
+2. Activity endpoint — OpenClaw POSTs `/api/activity` level. Rejected: adds coupling and still needs a CPU proxy anyway.
+3. File-based heartbeat — OpenClaw touches a file; collector checks mtime. Rejected: fragile, same coupling issue.
+
+### Decision: Self-Detecting Adaptive Intervals
+
+| Gateway CPU% (prev sample) | Consecutive idle samples | Next interval |
+|---|---|---|
+| > 40% | any | **5s** (heavy activity) |
+| 15–40% | any | **10s** (active) |
+| 2–15% | any | **30s** (light / heartbeat) |
+| < 2% | 1–2 | **30s** (transitioning to idle) |
+| < 2% | 3+ | **60s** (deep idle) |
+
+### Data Sparsity Handling
+
+Sparse/irregular intervals require time-scale x-axis in charts (not sequential index). Recharts handles this via `XAxis dataKey="ts" type="number" scale="time"`. Idle gaps display as honest time gaps in charts.
+
+**Schema addition:** `sample_interval_s INTEGER` column added to `metrics` table. Records actual elapsed seconds per sample. Enables "data density" indicator in dashboard UI.
+
+### HISTORY.md Confirmation
+David asked: "Just to confirm you are putting the history of this design process and of the future implementation process into history.MD right?"
+
+**Yes.** Every design decision, every architecture change, every significant conversation goes into `HISTORY.md`. This is the living record of how the project got where it is. Implementation decisions and debugging notes will be added as the project proceeds.
+
+### README Changes
+- Description updated to reference adaptive polling
+- Goal 3 updated ("adaptive poll interval, 5s–60s")
+- Architecture overview updated
+- Collector component spec replaced with full adaptive polling spec:
+  - Interval table (CPU% thresholds → target intervals)
+  - Data sparsity implications
+  - `sample_interval_s` schema addition
+  - Updated core loop pseudocode (now includes adaptive interval logic)
+- Known Limitations updated (PID churn window now "5–60s" not "10s")
+
+---
+
 *Future entries appended below as the project progresses.*
