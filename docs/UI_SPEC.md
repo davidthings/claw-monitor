@@ -13,7 +13,7 @@ The Overview page is the primary view. It answers the question: **what is OpenCl
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  STAT CARDS (top row)                                           │
-│  [CPU]  [MEMORY]  [GPU]  [DISK]  [TOKENS]                      │
+│  [CPU]  [MEMORY]  [GPU]  [DISK]  [TOKENS]                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  COMBINED RESOURCE CHART (main panel)                           │
 │                                                                 │
@@ -35,10 +35,11 @@ Five cards displayed in a row across the top:
 | Memory | `X.XXGB` | `of YYGb RSS (now)` |
 | GPU | `XX%` | `X.XGB VRAM (now)` |
 | Disk | `XXXMB` | `openclaw total` |
-| Tokens | `XXK in / XXK out` | `today` |
+| Tokens | `XX tok/min` | `current rate` |
 
 - Values update live via SSE (same mechanism as current)
-- Tokens card shows today's cumulative totals (since midnight local time), not a point-in-time reading
+- Tokens card shows the **current tokens/minute rate** — computed as total tokens (in + out) from `token_events` in the last 60 seconds
+- If no token events in the last 60 seconds, shows `0 tok/min`
 - If GPU is unavailable, GPU card shows `—` and is visually dimmed (same as current)
 
 ---
@@ -140,7 +141,7 @@ The Overview page makes the following API calls on load, then subscribes to SSE 
 
 1. **Y-axis strategy** — Multi-axis (CPU left, Network right, GPU right)? Or accept mixed-scale with a clear legend? Recharts supports dual Y-axis natively; more than two gets awkward. Recommendation: CPU + Memory on left axis (both expressed naturally), GPU% + Network on right axis (both dimensionally similar as activity indicators).
 
-2. **Token line data** — Token events are sparse and tied to LLM calls, not a continuous time series. A per-minute rolling count makes sense but needs a bucketing helper on the API or client side. Alternative: show tokens as a **bar series** overlaid on the line chart (events are discrete, not continuous).
+2. **Token line data** — Token events are sparse and tied to LLM calls, not a continuous time series. The chart line shows tokens/min (same unit as the stat card), bucketed on the client side by the chart's time resolution. Sparse periods show as 0 or gap. Alternative: show as a **bar series** since events are discrete — may read more naturally than a mostly-flat line with occasional spikes.
 
 3. **Tag clustering threshold** — At what pixel distance should tags be clustered? Suggest 8px.
 
