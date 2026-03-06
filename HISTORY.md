@@ -1,11 +1,21 @@
 # claw-monitor — Project History
 
+## Attribution Convention
+
+Each entry notes who did what at a high level:
+- **David** — product owner; defines requirements and approves design
+- **DavidBot** — OpenClaw main session; orchestrator; writes/updates design docs; incorporates David's feedback
+- **claw-monitor-builder** — OpenClaw subagent spawned by DavidBot; manages Claude Code; routes concerns upward
+- **Claude Code** — implementation agent; performs architecture review; will write all code once approved
+
 ---
 
 ## 2026-03-06 — Project Kickoff
 
 ### Context
 David Williams requested a lightweight OpenClaw resource monitor. The project was initiated via Signal message at 06:33 PST.
+
+**Who did what:** David defined requirements. DavidBot wrote the initial README.md and HISTORY.md, spawned claw-monitor-builder, committed to repo.
 
 ### Requirements (as stated)
 - Second-by-second (polling every 10s) monitoring of CPU, memory, and network I/O attributable to OpenClaw
@@ -36,6 +46,8 @@ David Williams requested a lightweight OpenClaw resource monitor. The project wa
 ---
 
 ## 2026-03-06 — Claude Code Architecture Review
+
+**Who did what:** claw-monitor-builder directed the session. Claude Code performed the architecture review, identified the bugs below, and resolved all open questions. DavidBot incorporated results into README.md and HISTORY.md.
 
 ### Session Summary
 Claude Code reviewed the initial architecture and provided detailed analysis, component specifications, and recommendations on all open questions.
@@ -127,6 +139,8 @@ Claude Code reviewed the initial architecture and provided detailed analysis, co
 
 ## 2026-03-06 — Adaptive Polling Requirement Added
 
+**Who did what:** David raised the requirement. DavidBot designed the self-detecting approach and documented it in README. No Claude Code involvement.
+
 ### Context
 David raised a new requirement at 06:47 PST (before implementation started): rather than a fixed 10s poll interval, the collector should use an **adaptive interval** that slows during idle periods and speeds up during active ones. Goal: avoid an "absolute mountain of data" while keeping granularity where it matters.
 
@@ -168,6 +182,99 @@ David asked: "Just to confirm you are putting the history of this design process
   - `sample_interval_s` schema addition
   - Updated core loop pseudocode (now includes adaptive interval logic)
 - Known Limitations updated (PID churn window now "5–60s" not "10s")
+
+---
+
+## 2026-03-06 — David's Design Review Round 2 (07:14 PST)
+
+**Who did what:** David reviewed the plan and raised 7 new requirements. DavidBot incorporated all of them into a full README rewrite and updated HISTORY. No Claude Code involvement in this round.
+
+### Requirements Added / Clarified
+
+#### 1. Agent Collaboration Documentation
+**Requirement:** Document how DavidBot, claw-monitor-builder, and Claude Code are working together. HISTORY.md should attribute who did what at a high level.
+
+**Done:** Added "Agent Collaboration" section to README with role table and decision authority description. Added "Attribution Convention" block to the top of HISTORY.md. Prior entries updated with "Who did what" callouts.
+
+#### 2. OpenClaw Integration: Minimal Coupling + Remembering Problem
+**Requirement:** Clarify that the integration should not be onerous or influence token consumption. OpenClaw should tell the tool the *kind* of thing it's doing and let the tool infer attribution from /proc. Address the problem of forgetting to report.
+
+**Design response:**
+- Renamed concept to "Minimal Coupling" principle: collector autodiscovers all PIDs from /proc; OpenClaw does NOT need to report individual processes for resource attribution.
+- OpenClaw provides only two things: **tags** (work type) and **token counts** (invisible to OS).
+- Detailed "Remembering Problem" table added to README showing reliability by trigger type: HIGH for session start and agent spawn, MEDIUM for mid-session type changes, LOW for session end.
+- Mitigation: tags are "until next tag" semantics — a missed update extends the previous tag slightly, not a data loss.
+- Two lines to be added to AGENTS.md startup routine to remind DavidBot to tag at conversation start.
+
+#### 3. File System Monitoring
+**Requirement:** Include disk/storage stats — how much space OpenClaw is taking up including log files. Exclude the monitor itself.
+
+**Design response:**
+- New `disk_snapshots` table added to schema.
+- New `/api/disk` endpoint.
+- New `disk_tracker.py` module using os.walk().
+- New `/disk` dashboard page with stacked bar chart by directory.
+- Tracked: `~/.openclaw/workspace`, `~/.openclaw/sessions`, `~/.openclaw/media`, `~/.openclaw/logs`, `~/.openclaw/claw-monitor`, `~/.openclaw` (total). journald log size via `journalctl --disk-usage`.
+- **Excluded:** `~/work/claw-monitor/` (the tool itself).
+- Written every 60s regardless of activity (disk growth is always relevant).
+
+#### 4. Adaptive Collection: 1s Sweep, Write-Gated
+**Requirement:** The 1s sweep can always run. Just don't write to DB every second when idle. This reduces risk of missing short activity bursts.
+
+**Design response:**
+- Replaced the "adaptive interval" model with a "sweep vs write" separation:
+  - **Fast loop always runs at 1s** (reads CPU, mem, net, GPU into memory)
+  - **Write gate:** write to DB if any OpenClaw PID has CPU% > 2% (activity) OR if last write was ≥60s ago (idle heartbeat)
+  - **Idle heartbeat:** writes one row per 60s with `is_idle_heartbeat=1` — marks "still idle, nothing happened" so gaps are distinguishable from missing data
+- Disk stats: 60s slow loop, separate from fast loop (os.walk is expensive)
+- Added `is_idle_heartbeat INTEGER DEFAULT 0` column to metrics schema.
+- `sample_interval_s` now reflects actual elapsed time since last write, not a target.
+
+#### 5. GPU Monitoring
+**Requirement:** Include GPU use in v1 (David expected this would be v2 but now wants it from the start).
+
+**Design response:**
+- Added GPU monitoring via `pynvml` (Python: `pip install nvidia-ml-py3`).
+- Metrics: GPU utilization %, VRAM used (MB) vs 24576 MB total, power draw (watts).
+- New `gpu_tracker.py` module.
+- Stored as `grp='gpu'` rows in `metrics` table (machine-level; per-process GPU not feasible without NVIDIA MIG/cgroups).
+- New `GpuChart.tsx` dashboard component.
+- GPU data added to daily aggregates table.
+- Added to /api/metrics/stream SSE payload.
+- `nvidia-ml-py3` added to deployment prerequisites.
+
+#### 6. Tagging System
+**Requirement:** Allow OpenClaw, David, or anything to tag the timeline with what they're doing — category (type of work) and a text description. These tags should overlay on charts to help interpret resource logs. DavidBot must remember to use them.
+
+**Design response:**
+- New `tags` table in schema (id, ts, category, text, source, session_id).
+- Categories: `conversation`, `coding`, `research`, `agent`, `heartbeat`, `qwen`, `idle`, `other`.
+- New `POST /api/tags` and `GET /api/tags` endpoints.
+- New `scripts/tag.sh` helper: `tag.sh <category> <text>` — validates, fires curl in background, exits 0 always.
+- New `TagOverlay.tsx` + `TagLog.tsx` components.
+- New `/tags` dashboard page with full tag history and manual tag creation UI.
+- Tag bands + vertical lines overlaid on all time-series charts.
+- **Remembering:** Addressed in README "Remembering Problem" section. DavidBot will add two lines to AGENTS.md: tag at session start and before agent spawns. This is reliable. Mid-session updates are best-effort. The design tolerates missed updates gracefully.
+
+#### 7. Motivation Section
+**Requirement:** Near the top of README, motivate why this tool exists — to help decide machine sizing (CPU speed, RAM, disk) for people's use.
+
+**Done:** Added "Motivation" section as the first content section in README, above Goals. States the infrastructure sizing purpose clearly, including the secondary goal of understanding resource composition (gateway vs Chrome vs agents vs Qwen vs system).
+
+### Major README Changes (Round 2)
+- **New sections:** Motivation, Agent Collaboration, Tagging System, `/disk` API, `/tags` API, `/disk` and `/tags` dashboard pages
+- **Revised sections:** OpenClaw Integration (renamed to "Minimal Coupling" principle), Collector (now two-loop architecture), Schema (added disk_snapshots, tags tables; updated metrics for GPU and idle heartbeat flag), File Layout (added new files), Design Decisions table (expanded to 10 decisions)
+- **README was substantially rewritten** to integrate all 7 requirements coherently; previous version preserved in git history
+
+### Status After Round 2
+- [x] Repo created by David
+- [x] Initial design (DavidBot + Claude Code planning session)
+- [x] Adaptive polling (DavidBot)
+- [x] Round 2 design review (DavidBot, this entry)
+- [ ] **David reviews Round 2 plan** ← current step
+- [ ] Implementation begins (Claude Code, directed by claw-monitor-builder)
+- [ ] Testing
+- [ ] Deployment
 
 ---
 

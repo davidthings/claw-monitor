@@ -2,54 +2,85 @@
 
 > **Status: PLANNING PHASE — No code written yet. Awaiting David's review before implementation.**
 
-A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, network I/O, and token consumption attributable to the OpenClaw process tree — at an **adaptive polling interval** that slows when OpenClaw is idle and quickens when it's busy — and exposes a real-time dashboard accessible from any Tailscale-linked device.
+---
+
+## Motivation
+
+David runs OpenClaw on a Linux server (RTX 3090, 64 GB RAM). The goal of this tool is to answer a practical question:
+
+> **How big does the machine need to be — CPU speed, RAM, disk — to support people's use of OpenClaw?**
+
+Right now the system is oversized by design (a beefy workstation repurposed as a server). claw-monitor provides the data to right-size future hardware: What's the peak CPU? How much RAM does a busy conversation actually need? How fast does storage grow? Does GPU matter for OpenClaw itself or only for local LLMs? Over time, these measurements across real usage patterns give a factual basis for infrastructure decisions instead of guesswork.
+
+Secondary goal: understanding the *composition* of resource use — what fraction is the gateway itself, what fraction is headless Chrome, what fraction is spawned agents, what fraction is the local LLM, and what fraction is unrelated system activity.
+
+---
+
+## Agent Collaboration
+
+Three agents built and maintain this project:
+
+| Agent | Role | Scope |
+|---|---|---|
+| **DavidBot** (OpenClaw main session) | Orchestrator & integration owner | Receives David's requirements; writes/updates design docs; incorporates feedback; owns the OpenClaw-side integration (tagging calls, token reporting); directs the builder subagent |
+| **claw-monitor-builder** (OpenClaw subagent) | Project manager | Spawned by DavidBot; manages Claude Code; translates design into implementation tasks; reviews Claude Code output; maintains README.md and HISTORY.md during build phase |
+| **Claude Code** | Implementation agent | Runs in `~/work/claw-monitor/`; writes all application code; follows design spec; PLANNING MODE ONLY until David approves |
+
+**Decision authority:** DavidBot writes the design docs and has final say on what goes in. Claude Code can surface implementation concerns (and already resolved several architectural bugs during planning). claw-monitor-builder routes those concerns back to DavidBot and David.
+
+**Attribution convention in HISTORY.md:** Each significant decision notes which agent drove it, at a high level (e.g., "Claude Code identified PID reuse bug; resolved by DavidBot in schema").
 
 ---
 
 ## Goals
 
-1. **Attribution**: Know exactly how much of the machine's CPU, RAM, and network is consumed by OpenClaw (gateway, headless Chrome, agents, OS utilities) vs. everything else.
-2. **Token visibility**: Track LLM token usage per external tool call, registered dynamically as tools are used.
-3. **Low overhead**: Collector runs at low priority (nice +10), adaptive poll interval (5s–60s based on activity), fire-and-forget.
-4. **Persistent dashboard**: Available 24/7 on a fixed Tailscale-reachable port.
-5. **Dynamic registration**: OpenClaw can register new PIDs/tools with a single lightweight API call — no continuous overhead.
+1. **Right-size data** for infrastructure decisions: CPU, RAM, disk, network requirements for OpenClaw under real usage
+2. **Attribution**: know what fraction of machine resources is OpenClaw (gateway, browser, agents) vs. local LLM (Qwen) vs. unrelated system activity
+3. **Token visibility**: track LLM token consumption per tool type for cost analysis
+4. **Tagging**: let OpenClaw and David annotate the timeline with work-type context (so raw numbers can be correlated with what was happening)
+5. **Low overhead**: collector doesn't noticeably compete with OpenClaw or Qwen
+6. **Persistent dashboard**: available 24/7 on a fixed Tailscale-reachable port from any device
 
 ---
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  OpenClaw (gateway + Chrome + agents)                   │
-│  ↓ fire-and-forget POST (one per new tool/PID)          │
-├─────────────────────────────────────────────────────────┤
-│  claw-monitor-api  (Next.js API routes, port 7432)      │
-│  ├── /api/registry/process  ← PID registration          │
-│  ├── /api/registry          ← list processes            │
-│  ├── /api/metrics           ← query historical data     │
-│  ├── /api/metrics/stream    ← SSE live feed             │
-│  ├── /api/tokens            ← token event ingestion     │
-│  └── /api/tokens/summary    ← aggregate token usage     │
-├─────────────────────────────────────────────────────────┤
-│  claw-collector  (Python daemon, nice +10, 5s–60s adaptive) │
-│  ├── reads /proc (CPU, mem per PID; net from /proc/net)    │
-│  ├── resolves PID→group via registry                       │
-│  ├── verifies PID validity (detects reuse via comm)        │
-│  ├── self-adjusts interval based on gateway CPU%           │
-│  └── writes to SQLite (WAL mode, with ts per sample)       │
-├─────────────────────────────────────────────────────────┤
-│  SQLite DB  (~/.openclaw/claw-monitor/metrics.db)       │
-│  ├── metrics           (time-series: cpu/mem by group)  │
-│  ├── metrics_daily     (daily aggregates, retained forever)│
-│  ├── token_events      (token usage per tool call)      │
-│  └── process_registry  (known PIDs + tool names)       │
-├─────────────────────────────────────────────────────────┤
-│  Dashboard  (Next.js + React + Radix UI + Recharts)     │
-│  ├── Real-time charts (CPU, mem, network)               │
-│  ├── Token usage table per tool + estimated cost        │
-│  ├── Process attribution breakdown                      │
-│  └── Live process registry viewer                       │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  OpenClaw (gateway + Chrome + agents)                       │
+│  ↓ tag POST at session start / work-type change (trivial)   │
+│  ↓ token POST after each LLM tool call (fire-and-forget)    │
+├─────────────────────────────────────────────────────────────┤
+│  claw-monitor-api  (Next.js API routes, port 7432)          │
+│  ├── /api/tags           ← work-type tag ingestion          │
+│  ├── /api/tokens         ← token event ingestion            │
+│  ├── /api/registry       ← (optional) explicit PID hints    │
+│  ├── /api/metrics        ← query historical data            │
+│  ├── /api/metrics/stream ← SSE live feed                    │
+│  └── /api/tokens/summary ← aggregate token usage           │
+├─────────────────────────────────────────────────────────────┤
+│  claw-collector  (Python daemon, nice +10)                  │
+│  ├── FAST LOOP (1s): CPU, mem, net, GPU                     │
+│  │   └── writes to DB only on activity OR every 60s (idle)  │
+│  ├── SLOW LOOP (60s): disk space per directory              │
+│  ├── resolves PID→group automatically via /proc scan        │
+│  ├── GPU via pynvml (RTX 3090)                              │
+│  └── SQLite WAL mode                                        │
+├─────────────────────────────────────────────────────────────┤
+│  SQLite DB  (~/.openclaw/claw-monitor/metrics.db)           │
+│  ├── metrics         (cpu/mem/net/gpu — written on activity) │
+│  ├── metrics_daily   (daily aggregates, retained forever)   │
+│  ├── disk_snapshots  (per-directory sizes, every 60s)       │
+│  ├── token_events    (per-tool-call token usage)            │
+│  ├── tags            (work-type annotations)                │
+│  └── process_registry (known PIDs + groups)                 │
+├─────────────────────────────────────────────────────────────┤
+│  Dashboard  (Next.js + React + Radix UI + Recharts)         │
+│  ├── Real-time charts (CPU/mem/GPU/net, with tag overlays)  │
+│  ├── Disk usage timeline + breakdown                        │
+│  ├── Token usage by tool/model/session                      │
+│  └── Process registry viewer                                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -58,14 +89,18 @@ A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, netw
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Collector language | Python 3 + psutil | I/O-bound, not CPU-bound. psutil handles /proc robustly. Rust saves nothing here. |
-| Token cost storage | Raw counts only | Pricing changes frequently. Cost computed in dashboard via `pricing.json`. |
-| Data retention | 14 days full-res, daily aggregates forever | ~35 MB for 14 days at 10s/6 groups/50 bytes. Daily is sufficient for history > 1 month. |
-| Auth | Tailscale-only + IP range middleware | Tailscale = network-level auth. Middleware rejects non-Tailscale IPs as defense-in-depth. |
-| Process manager | systemd (user scope) | Collector already uses systemd; consistent tooling, no extra deps, better log rotation. |
-| Live updates | SSE (Server-Sent Events) | One-directional push, native to Next.js, 10s interval, auto-reconnect built into EventSource. |
-| Network I/O | Machine-level only | Per-PID net accounting requires libpcap or cgroups. Machine-level from /proc/net/dev is sufficient. |
-| DB concurrency | WAL mode | Both Python collector and Next.js API open with `PRAGMA journal_mode=WAL`. No SQLITE_BUSY errors. |
+| Collector language | Python 3 + psutil + pynvml | I/O-bound; psutil handles /proc robustly; pynvml is the standard NVIDIA Python binding; <300 lines total |
+| Token cost storage | Raw counts only | Pricing changes frequently; compute USD in dashboard via `pricing.json` |
+| Data retention | 14 days full-res, daily aggregates forever | ~50 MB for 14 days with 1s-resolution writes on active periods; daily sufficient for long-term trends |
+| Auth | Tailscale + IP range middleware | Tailscale = network-level auth; middleware rejects non-Tailscale IPs as defense-in-depth |
+| Process manager | systemd (user scope) | Consistent tooling, no extra deps, native log rotation |
+| Live updates | SSE (Server-Sent Events) | One-directional push, native to Next.js, auto-reconnect built in |
+| Network I/O | Machine-level only | Per-PID net requires libpcap/cgroups; machine-level from `/proc/net/dev` is sufficient for sizing questions |
+| GPU | Machine-level via pynvml | Can't attribute GPU per-process without cgroups/MIG; machine-level shows Qwen vs idle clearly |
+| DB concurrency | WAL mode | Both Python and Node.js set `PRAGMA journal_mode=WAL`; prevents `SQLITE_BUSY` errors |
+| Sweep vs write | Separate | 1s sweep always; write gated on activity or 60s idle heartbeat |
+| Disk stats | Slow loop (60s) | Directory scanning with `os.walk()` is expensive; 60s is fine for storage growth analysis |
+| OpenClaw coupling | Minimal | Collector autodiscovers all PIDs from /proc; OpenClaw only provides tags (work type) and token counts |
 
 ---
 
@@ -73,72 +108,66 @@ A lightweight, always-on resource monitor for OpenClaw. Tracks CPU, memory, netw
 
 ### 1. `claw-collector/` — Python daemon
 
-- **Language:** Python 3 + psutil + sqlite3 (stdlib)
-- **Poll interval:** Adaptive — 5s to 60s depending on OpenClaw activity (see below)
-- **Priority:** `nice +10` (SCHED_OTHER, low priority)
+- **Language:** Python 3 + psutil + pynvml + sqlite3 (stdlib)
+- **Priority:** `nice +10` (SCHED_OTHER — low priority)
 - **Process manager:** `claw-collector.service` (systemd user scope)
 
-#### Adaptive Polling
+#### Two-Loop Architecture
 
-The collector self-adjusts its poll interval by observing the openclaw-gateway process's own CPU% from the previous sample. No API calls, no coupling to OpenClaw — purely self-contained.
+The collector runs two independent loops:
 
-| Gateway CPU% (prev sample) | Consecutive idle samples | Next interval |
-|---|---|---|
-| > 40% | any | **5s** (heavy activity) |
-| 15–40% | any | **10s** (active) |
-| 2–15% | any | **30s** (light / heartbeat) |
-| < 2% | 1–2 | **30s** (transitioning to idle) |
-| < 2% | 3+ | **60s** (deep idle) |
+**Fast loop (1s sweep):** Reads CPU%, mem (RSS), net I/O delta, GPU utilization, GPU VRAM. Holds results in memory. Decides whether to write to DB:
+- Write if any tracked OpenClaw process has CPU% > 2% (activity detected)
+- Write if last write was >60s ago (idle heartbeat — confirms "nothing happened", not "data missing")
+- Skip write if below threshold and last write was <60s ago (true idle, no data wasted)
 
-**Implications for stored data:**
-- Timestamps are stored precisely (unix epoch, second resolution)
-- Intervals between rows will vary — dashboard uses a **time-scale x-axis** (not sequential index)
-- Sparse idle-period gaps are displayed honestly as time gaps in charts
-- A `sample_interval_s` column records actual elapsed seconds per sample, enabling the dashboard to show a "data density" indicator (e.g., "60s intervals" vs "5s intervals")
+This means: the DB contains dense data during active periods and one row per 60s during idle. Charts show sparse idle gaps honestly.
 
-**Schema addition:**
-```sql
-ALTER TABLE metrics ADD COLUMN sample_interval_s INTEGER;
--- Actual elapsed seconds since previous sample (not the target interval)
-```
+**Slow loop (60s):** Scans disk directories with `os.walk()`. Writes one `disk_snapshots` row per 60s regardless of activity — disk growth is always tracked.
 
-#### Collector Core Loop
+#### Activity Detection Thresholds
+
+| Condition | Action |
+|---|---|
+| Any OpenClaw PID CPU% > 2% | Write fast-loop sample to DB immediately |
+| No OpenClaw activity AND last write < 60s ago | Skip write (true idle) |
+| No OpenClaw activity AND last write ≥ 60s | Write idle heartbeat (marks gap as intentional, not missing data) |
+
+#### Fast Loop — Core Logic
 
 ```
 On startup:
-  1. Open SQLite DB (WAL mode)
-  2. Create tables if not exist
-  3. Bootstrap: auto-discover openclaw-gateway PID via /proc/*/cmdline scan
-     Walk child tree via /proc/<pid>/children to auto-register all children
-  4. Load process_registry into memory
-  5. Set initial interval = 30s, idle_count = 0
+  1. Open SQLite DB (WAL mode), create tables if not exist
+  2. Bootstrap: scan /proc/*/cmdline to find openclaw-gateway PID
+     Walk child tree to discover all children; auto-assign groups
+  3. Init pynvml; open GPU handle for device 0 (RTX 3090)
+  4. last_write_ts = 0
 
-Every [adaptive interval]:
-  1. Reload process_registry (small SELECT, catches new API registrations)
+Every 1 second:
+  1. Reload process_registry from DB (catch new API registrations)
   2. For each registered PID:
-     a. Check /proc/<pid> exists → if not, mark unregistered in DB
-     b. Read /proc/<pid>/comm → if doesn't match registered name, mark unregistered (PID reuse!)
-     c. Read /proc/<pid>/stat → get utime+stime (cumulative CPU ticks)
+     a. Check /proc/<pid> exists → if not, mark unregistered
+     b. Read /proc/<pid>/comm → verify matches registered name (PID reuse detection)
+     c. Read /proc/<pid>/stat → compute CPU% (delta from previous tick)
      d. Read /proc/<pid>/status → get VmRSS (memory)
-     e. Compute CPU% = (ticks_now - ticks_prev) / (elapsed_s * cpu_count)
-        (First sample after PID registration has no CPU data — emit NULL for that tick)
   3. Aggregate per group: sum CPU%, sum RSS
-  4. Read /proc/net/dev → compute delta for net in/out bytes
-  5. INSERT one row per group into metrics (no net columns)
-     Include sample_interval_s = actual elapsed since last tick
-  6. INSERT one row with grp='machine' containing net_in_kb, net_out_kb
-  7. Compute next interval:
-     - gateway_cpu = CPU% for openclaw-gateway from step 2
-     - if gateway_cpu > 40%: interval = 5, idle_count = 0
-     - elif gateway_cpu > 15%: interval = 10, idle_count = 0
-     - elif gateway_cpu > 2%: interval = 30, idle_count = 0
-     - else: idle_count += 1; interval = 60 if idle_count >= 3 else 30
-  8. Daily (first tick after midnight):
-     - INSERT aggregated rows into metrics_daily
-     - DELETE FROM metrics WHERE ts < (now - 14 days)
-  9. Sleep for computed interval
+  4. Read /proc/net/dev → compute net in/out delta since last tick
+  5. Read GPU: gpu_util_pct, vram_used_mb, power_w via pynvml
+  6. Determine whether to write:
+     active = any_openclaw_pct > 2.0
+     elapsed = now - last_write_ts
+     should_write = active OR elapsed >= 60
+  7. If should_write:
+     INSERT rows into metrics (one per group, plus 'net' row, plus 'gpu' row)
+     Set sample_interval_s = elapsed (actual elapsed seconds since last write)
+     last_write_ts = now
 
-On SIGTERM: clean shutdown, close DB
+Every 60 seconds (slow loop, runs concurrently):
+  1. Scan configured directories with os.walk(); record total size in bytes
+  2. INSERT one row per directory into disk_snapshots
+  3. Daily: INSERT into metrics_daily; DELETE old rows from metrics (>14 days)
+
+On SIGTERM: clean shutdown, close GPU handle, close DB
 ```
 
 #### PID Auto-Grouping Rules
@@ -146,261 +175,239 @@ On SIGTERM: clean shutdown, close DB
 | Condition | Group |
 |---|---|
 | Process is `openclaw-gateway` | `openclaw-core` |
-| Direct child of gateway, `chrome`/`chromium` in cmdline | `openclaw-browser` |
-| Direct child of gateway, other | `openclaw-core` |
+| Child of gateway with `chrome` or `chromium` in cmdline | `openclaw-browser` |
+| Child of gateway, other | `openclaw-core` |
 | Grandchild+ of gateway | `openclaw-agent` |
-| Manually registered with explicit group | (as specified) |
+| Manually registered via API with explicit group | (as specified) |
+| Everything else on the machine | not tracked (filtered out) |
+
+#### GPU Metrics (pynvml, RTX 3090)
+
+```python
+import pynvml
+pynvml.nvmlInit()
+handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
+util    = pynvml.nvmlDeviceGetUtilizationRates(handle)  # .gpu (%), .memory (%)
+mem     = pynvml.nvmlDeviceGetMemoryInfo(handle)         # .used, .total (bytes)
+power   = pynvml.nvmlDeviceGetPowerUsage(handle)         # milliwatts → divide by 1000
+```
+
+Stored as `grp='gpu'` rows in `metrics`. GPU is machine-level — cannot be attributed per-process without NVIDIA MIG or cgroups, which are out of scope for v1. GPU use by Qwen will appear in the GPU timeline and is clearly visible without per-process attribution.
+
+#### Disk Monitoring
+
+Configured directories to track (defined in `collector/config.py`, editable):
+
+```python
+DISK_DIRS = {
+    "openclaw-workspace": "~/.openclaw/workspace",
+    "openclaw-sessions":  "~/.openclaw/sessions",
+    "openclaw-media":     "~/.openclaw/media",
+    "openclaw-logs":      "~/.openclaw/logs",     # if it exists
+    "monitor-db":         "~/.openclaw/claw-monitor",
+    "openclaw-total":     "~/.openclaw",           # entire openclaw dir
+}
+# Excluded: ~/work/claw-monitor (the tool itself)
+# Qwen models (~19GB static) tracked separately as a one-time size fact
+```
+
+Each 60s, writes total bytes and file count per key. Sessions dir in particular is expected to grow over time and is the primary disk sizing signal.
+
+journald logs for OpenClaw services tracked via `journalctl --disk-usage` (one subprocess call per 60s, low cost).
 
 #### Known Limitations
 
-- **PID churn**: Processes that live and die within a single poll window are missed entirely (window is 5–60s depending on activity level). Acceptable — short-lived processes contribute minimal resource usage. Token tracking is unaffected (handled via API).
-- **No per-PID network I/O**: Machine-level net only. Feasible improvement in v2 (cgroups or eBPF).
-- **First sample after registration**: CPU% is NULL because delta calculation requires two readings.
+- **PID churn at 1s**: Processes that spawn and die within 1 second are missed. Acceptable — such processes contribute negligible cumulative resources. Token tracking via API is unaffected.
+- **No per-PID network I/O**: Machine-level only. Per-PID network requires libpcap or cgroups — v2 candidate.
+- **No per-process GPU**: Machine-level only. GPU use is dominated by Qwen when running; absence/presence is clearly visible.
+- **First CPU sample after PID registration**: NULL (delta requires two readings).
+- **Disk scan cost**: `os.walk()` on large directories can take 1–2s. Runs in slow loop (60s cycle), so does not block fast loop.
 
 ---
 
 ### 2. `web/` — Next.js app (TypeScript)
 
 - **Framework:** Next.js 14 (App Router), React, Radix UI Themes, Recharts
-- **Port:** 7432 (permanent, bound to 0.0.0.0)
+- **Port:** **7432** (permanent, bound to 0.0.0.0)
 - **Process manager:** `claw-web.service` (systemd user scope)
 - **DB access:** `better-sqlite3` (synchronous, WAL mode)
 
 #### Middleware: Tailscale IP Guard
 
-All routes are protected by a middleware that rejects requests not originating from:
-- `127.0.0.1` (localhost)
+All routes reject requests not from:
+- `127.0.0.1` / `::1` (localhost)
 - `100.64.0.0/10` (Tailscale CGNAT range)
 
-Returns `403 Forbidden` otherwise. This is defense-in-depth alongside Tailscale network auth — not a full auth system.
+Returns `403 Forbidden` otherwise.
 
 #### Pricing Config
 
-`web/src/lib/pricing.json` — maps model IDs to per-token costs in USD. Updated manually when pricing changes.
+`web/src/lib/pricing.json` — maps model IDs to per-token costs (USD). Updated manually.
 
 ```json
 {
   "claude-sonnet-4-6": { "input_per_mtok": 3.00, "output_per_mtok": 15.00 },
   "claude-haiku-4-5":  { "input_per_mtok": 0.25, "output_per_mtok": 1.25 },
-  "gpt-4o":            { "input_per_mtok": 5.00, "output_per_mtok": 15.00 },
+  "gpt-5.2":           { "input_per_mtok": 5.00, "output_per_mtok": 15.00 },
   "gpt-4o-mini":       { "input_per_mtok": 0.15, "output_per_mtok": 0.60 }
 }
 ```
 
 ---
 
-### 3. OpenClaw Integration
+## OpenClaw → Monitor Integration
 
-OpenClaw fires a single `curl` in the background when:
-- A new agent/tool PID is spawned → `POST /api/registry/process`
-- A tool call returns token usage → `POST /api/tokens`
+### Design Principle: Minimal Coupling
 
-**Zero coupling:** If claw-monitor is down, the curl fails silently. OpenClaw is unaffected. The collector will still auto-discover OpenClaw PIDs on its next scan.
+**The collector does the heavy lifting.** It autodiscovers all OpenClaw PIDs by scanning `/proc/*/cmdline` for `openclaw-gateway` on startup and walking the child process tree. Resource attribution (CPU%, RAM, net) happens entirely in the collector — OpenClaw does not need to report this.
+
+**OpenClaw provides two things the collector cannot infer:**
+1. **Tags** — what kind of work is happening (the collector can see CPU spikes but not *why*)
+2. **Token counts** — LLM token usage is invisible to the OS; OpenClaw is the only source of truth
+
+Everything else (PID registration, process groups) is handled automatically. The optional `POST /api/registry/process` endpoint exists for edge cases where OpenClaw spawns a tool that is not a child process of the gateway, but this is rarely needed.
+
+### Tagging: The Work-Type Context System
+
+Tags annotate the timeline with human-readable context. They appear as colored overlays on all time-series charts. A tag is in effect from its timestamp until the next tag (or session end).
+
+**Tag categories:**
+
+| Category | Meaning |
+|---|---|
+| `conversation` | Active user conversation (reading, thinking, replying) |
+| `coding` | Running a coding agent (Claude Code, Codex, OpenCode) |
+| `research` | Web searches, reading pages, document analysis |
+| `agent` | Spawned a subagent doing autonomous work |
+| `heartbeat` | Heartbeat / background check cycle |
+| `qwen` | Qwen local LLM is being used |
+| `idle` | No meaningful OpenClaw activity |
+| `other` | Anything that doesn't fit the above |
+
+**Tag call format:**
+
+```bash
+# Fire-and-forget (background, silent failure)
+curl -sf -X POST http://localhost:7432/api/tags \
+  -H 'Content-Type: application/json' \
+  -d '{"category":"conversation","text":"Signal message from David about claw-monitor design","source":"openclaw"}' &
+```
+
+**Helper script:** `scripts/tag.sh <category> <text>` — validates category, constructs JSON, fires curl in background, exits 0 always.
+
+### The Remembering Problem — Honest Assessment
+
+Tagging requires OpenClaw to remember to call the API at the right moments. Here is an honest assessment of reliability:
+
+| Trigger | Reliability | Method |
+|---|---|---|
+| Session start — set initial tag | **High** | Added to AGENTS.md startup routine; happens before any work |
+| Spawning a subagent | **High** | Already explicit in my workflow; tag before/after spawn |
+| Starting a Qwen session | **High** | Explicit script invocation; easy to add tag call |
+| Work type changes mid-conversation | **Medium** | May forget; tag extends until next tag so data is imprecise but not missing |
+| Session end / going idle | **Low** | No reliable signal; idle heartbeat from collector is a proxy |
+
+**Mitigation:** Tags are best-effort. The collector always writes idle heartbeats at 60s when no activity is detected, so the timeline never has unexplained gaps. A missed mid-session tag just means the previous tag extends a bit longer than it should — minor accuracy issue, not a data integrity problem.
+
+**What gets added to AGENTS.md:**
+A two-line reminder at the top of the "Every Session" section:
+```
+- Tag your session type at the start: scripts/tag.sh conversation "brief description"
+- Tag before spawning agents: scripts/tag.sh agent "agent name and task"
+```
+
+### Token Reporting
+
+After each LLM API call that returns token usage metadata, OpenClaw fires:
+
+```bash
+curl -sf -X POST http://localhost:7432/api/tokens \
+  -H 'Content-Type: application/json' \
+  -d "{\"tool\":\"web-search\",\"model\":\"claude-sonnet-4-6\",\"tokens_in\":1500,\"tokens_out\":3200,\"session_id\":\"${SESSION_ID}\"}" &
+```
+
+Token reporting is currently manual (OpenClaw calls it explicitly when a tool response includes usage). A future OpenClaw plugin hook could automate this.
+
+### Failure Modes
+
+| Scenario | Impact |
+|---|---|
+| Monitor not running | All curl calls fail silently. Collector restarts and autodiscovers PIDs. No OpenClaw disruption. |
+| Tag missed mid-session | Previous tag extends; timing of work-type boundary is imprecise. Not a data loss. |
+| Token call missed | That LLM call's token count is missing from totals. Acceptable. |
+| PID reuse | Collector detects via /proc comm mismatch, marks old row unregistered, ignores new process. |
+| SQLite contention | WAL mode serializes writes with millisecond waits. No data loss. |
 
 ---
 
-## API Specification
+## Tagging System
 
-### `POST /api/registry/process`
-Register a PID for monitoring.
+### API
 
-**Request:**
-```json
+```
+POST /api/tags
 {
-  "pid": 12345,
-  "name": "chrome",
-  "group": "openclaw-browser",
-  "description": "Headless Chrome for web scraping"
+  "category":   "conversation",          // required; must be in allowed set
+  "text":       "Signal message: ...",   // required; human-readable description
+  "source":     "openclaw",              // required: "openclaw" | "david" | "system" | "auto"
+  "session_id": "agent:main:signal:..."  // optional; correlates to an OpenClaw session
 }
 ```
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `pid` | integer | ✅ | OS process ID (positive integer) |
-| `name` | string | ✅ | Should match `/proc/<pid>/comm` (used for PID reuse detection) |
-| `group` | string | ✅ | One of: `openclaw-core`, `openclaw-browser`, `openclaw-agent`, `system` |
-| `description` | string | — | Human-readable note |
+Tags can also be created manually from the dashboard UI (David can annotate the timeline directly).
 
-**Response 201:**
-```json
-{ "ok": true, "registered": 1709712000 }
+### Database
+
+```sql
+CREATE TABLE tags (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         INTEGER NOT NULL,
+  category   TEXT NOT NULL,   -- 'conversation'|'coding'|'research'|'agent'|'heartbeat'|'qwen'|'idle'|'other'
+  text       TEXT NOT NULL,
+  source     TEXT NOT NULL,   -- 'openclaw'|'david'|'system'|'auto'
+  session_id TEXT
+);
+CREATE INDEX idx_tags_ts ON tags(ts);
 ```
 
-**Response 400:** PID not a positive integer, or group not in allowed set.
+### Dashboard Integration
 
----
-
-### `POST /api/tokens`
-Log a token usage event.
-
-**Request:**
-```json
-{
-  "tool": "web-search",
-  "model": "claude-sonnet-4-6",
-  "tokens_in": 1500,
-  "tokens_out": 3200,
-  "session_id": "agent-7a3b"
-}
-```
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `tool` | string | ✅ | Tool/function name |
-| `model` | string | ✅ | Model identifier (used for cost computation) |
-| `tokens_in` | integer | ✅ | Input/prompt token count |
-| `tokens_out` | integer | ✅ | Output/completion token count |
-| `session_id` | string | — | Correlates events to an agent session |
-
-**Response 201:**
-```json
-{ "ok": true, "id": 42 }
-```
-
----
-
-### `GET /api/metrics`
-Query time-series resource data.
-
-**Query params:**
-
-| Param | Type | Default | Notes |
-|---|---|---|---|
-| `from` | unix timestamp | required | Start of range |
-| `to` | unix timestamp | now | End of range |
-| `group` | string | all | Filter by group name |
-| `resolution` | string | `auto` | `raw`, `hourly`, `daily`, or `auto` |
-
-Auto resolution: `< 6h` → raw, `6h–3d` → hourly, `> 3d` → daily.
-
-For hourly/daily within 14-day window: aggregated on the fly. For older data: reads from `metrics_daily`.
-
-**Response 200:**
-```json
-{
-  "data": [
-    {
-      "ts": 1709712000,
-      "group": "openclaw-core",
-      "cpu_pct": 34.2,
-      "mem_rss_mb": 512.3
-    },
-    {
-      "ts": 1709712000,
-      "group": "machine",
-      "net_in_kb": 120.5,
-      "net_out_kb": 45.2
-    }
-  ],
-  "count": 2,
-  "resolution": "raw"
-}
-```
-
----
-
-### `GET /api/metrics/stream`
-SSE live feed. Emits one event per collector tick (~10s).
-
-**Response headers:** `Content-Type: text/event-stream`
-
-**Event format:**
-```
-data: {"ts":1709712000,"groups":{"openclaw-core":{"cpu_pct":34.2,"mem_rss_mb":512.3},"openclaw-browser":{"cpu_pct":12.1,"mem_rss_mb":1024.0},"openclaw-agent":{"cpu_pct":5.0,"mem_rss_mb":128.0}},"net":{"in_kb":120.5,"out_kb":45.2}}
-
-```
-
-Clients reconnect automatically via `EventSource`. The `[Live ●]` indicator in the dashboard turns red if the connection drops.
-
----
-
-### `GET /api/registry`
-List registered processes.
-
-**Query params:** `active=true` (optional) — return only where `unregistered IS NULL`.
-
-**Response 200:**
-```json
-{
-  "processes": [
-    {
-      "id": 1,
-      "pid": 12345,
-      "name": "chrome",
-      "group": "openclaw-browser",
-      "description": "Headless Chrome",
-      "registered": 1709712000,
-      "unregistered": null,
-      "alive": true
-    }
-  ]
-}
-```
-
-The `alive` field is computed live by checking `/proc/<pid>` existence at query time.
-
----
-
-### `GET /api/tokens/summary`
-Aggregate token usage.
-
-**Query params:**
-
-| Param | Type | Default | Notes |
-|---|---|---|---|
-| `from` | unix timestamp | 24h ago | Start of range |
-| `to` | unix timestamp | now | End of range |
-| `group_by` | string | `tool` | `tool`, `model`, or `session_id` |
-
-**Response 200:**
-```json
-{
-  "summary": [
-    {
-      "tool": "web-search",
-      "total_in": 45000,
-      "total_out": 120000,
-      "call_count": 23,
-      "models": ["claude-sonnet-4-6"],
-      "est_cost_usd": 6.20
-    }
-  ],
-  "totals": {
-    "tokens_in": 45000,
-    "tokens_out": 120000,
-    "calls": 23,
-    "est_cost_usd": 6.20
-  }
-}
-```
-
-Cost is computed server-side using `pricing.json` at query time.
+Tags appear as:
+- **Vertical lines** on time-series charts at the tag timestamp
+- **Colored bands** between consecutive tags (each category has a distinct color)
+- **Tag log** panel on the overview page showing recent annotations
+- **Tooltip** on hover showing category, text, source, and duration (time until next tag)
 
 ---
 
 ## Database Schema (SQLite)
 
 ```sql
-PRAGMA journal_mode=WAL;  -- Must be set by both collector and web app
+PRAGMA journal_mode=WAL;
 
--- Time-series resource metrics (per group, per tick)
--- Network I/O stored in rows where grp = 'machine'
+-- Fast-loop time-series (written on activity or 60s idle heartbeat)
 CREATE TABLE metrics (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts         INTEGER NOT NULL,  -- unix timestamp
-  grp        TEXT NOT NULL,     -- 'openclaw-core' | 'openclaw-browser' | 'openclaw-agent' | 'system' | 'machine'
-  cpu_pct    REAL,              -- NULL on first sample after PID registration
-  mem_rss_mb REAL,
-  net_in_kb  REAL,              -- Only set when grp = 'machine'
-  net_out_kb REAL               -- Only set when grp = 'machine'
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                INTEGER NOT NULL,
+  grp               TEXT NOT NULL,       -- 'openclaw-core'|'openclaw-browser'|'openclaw-agent'|'net'|'gpu'
+  cpu_pct           REAL,                -- NULL on first sample; not set for net/gpu rows
+  mem_rss_mb        REAL,                -- not set for net/gpu rows
+  net_in_kb         REAL,                -- only set when grp='net'
+  net_out_kb        REAL,                -- only set when grp='net'
+  gpu_util_pct      REAL,                -- only set when grp='gpu'
+  gpu_vram_used_mb  REAL,                -- only set when grp='gpu'
+  gpu_power_w       REAL,                -- only set when grp='gpu'
+  sample_interval_s INTEGER NOT NULL,    -- actual elapsed seconds since last write (not target interval)
+  is_idle_heartbeat INTEGER DEFAULT 0    -- 1 = written as idle heartbeat (no activity), 0 = active data
 );
 CREATE INDEX idx_metrics_ts ON metrics(ts);
 CREATE INDEX idx_metrics_grp_ts ON metrics(grp, ts);
 
--- Daily aggregates (retained forever)
+-- Daily aggregates (retained forever for sizing analysis)
 CREATE TABLE metrics_daily (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  date           TEXT NOT NULL,  -- 'YYYY-MM-DD'
+  date           TEXT NOT NULL,
   grp            TEXT NOT NULL,
   avg_cpu_pct    REAL,
   max_cpu_pct    REAL,
@@ -408,11 +415,24 @@ CREATE TABLE metrics_daily (
   max_mem_rss_mb REAL,
   sum_net_in_kb  REAL,
   sum_net_out_kb REAL,
+  avg_gpu_pct    REAL,
+  max_gpu_pct    REAL,
+  max_vram_mb    REAL,
   UNIQUE(date, grp)
 );
 
--- Registered processes
--- NOTE: id is the primary key (NOT pid) to handle Linux PID reuse correctly
+-- Disk space snapshots (every 60s regardless of activity)
+CREATE TABLE disk_snapshots (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          INTEGER NOT NULL,
+  dir_key     TEXT NOT NULL,      -- e.g. 'openclaw-sessions', 'openclaw-total'
+  size_bytes  INTEGER NOT NULL,
+  file_count  INTEGER,
+  journald_mb REAL                -- only set when dir_key='openclaw-logs'
+);
+CREATE INDEX idx_disk_ts ON disk_snapshots(ts);
+
+-- Registered processes (optional hints from OpenClaw; mostly auto-discovered)
 CREATE TABLE process_registry (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   pid          INTEGER NOT NULL,
@@ -429,22 +449,258 @@ CREATE TABLE token_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   ts         INTEGER NOT NULL,
   tool       TEXT NOT NULL,
-  model      TEXT NOT NULL,    -- required for cost computation
+  model      TEXT NOT NULL,
   tokens_in  INTEGER,
   tokens_out INTEGER,
-  session_id TEXT              -- optional, correlates events to agent sessions
+  session_id TEXT
 );
 CREATE INDEX idx_token_events_ts ON token_events(ts);
 CREATE INDEX idx_token_events_tool ON token_events(tool);
+
+-- Work-type annotations
+CREATE TABLE tags (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         INTEGER NOT NULL,
+  category   TEXT NOT NULL,
+  text       TEXT NOT NULL,
+  source     TEXT NOT NULL,
+  session_id TEXT
+);
+CREATE INDEX idx_tags_ts ON tags(ts);
 ```
 
 ### Schema Design Notes
 
-- **`process_registry.id` is the PK**, not `pid`. Linux recycles PIDs — using pid as PK causes collision when a new process reuses a dead PID. The collector verifies `/proc/<pid>/comm` matches `name` before trusting a PID.
-- **`cost_usd` is not stored**. Pricing changes; compute cost from raw counts + `pricing.json` at query time.
-- **`model` is NOT NULL** in `token_events`. Required for cost computation to work.
-- **`session_id`** in `token_events` enables future per-session token attribution.
-- **Network I/O** is stored in a dedicated `grp='machine'` row — not replicated across all group rows.
+- **`process_registry.id` is autoincrement PK** (not `pid`) — handles Linux PID reuse correctly
+- **`is_idle_heartbeat`** flag distinguishes "nothing happening" from "data missing" in charts
+- **`sample_interval_s`** records actual elapsed time, not target — dashboard shows data density
+- **`cost_usd` not stored** — computed at query time from raw token counts + pricing.json
+- **`disk_snapshots`** is always written at 60s regardless of activity (disk growth needs continuous tracking)
+- **`metrics` grp='gpu'** is machine-level (not per-process); GPU use by Qwen is visible without attribution
+
+---
+
+## API Specification
+
+### `POST /api/tags`
+Submit a work-type tag.
+
+**Request:**
+```json
+{
+  "category": "conversation",
+  "text": "Signal: David asking about claw-monitor design",
+  "source": "openclaw",
+  "session_id": "agent:main:signal:direct:+15303386428"
+}
+```
+
+**Response 201:** `{ "ok": true, "id": 7 }`
+**Response 400:** category not in allowed set, or missing required fields.
+
+---
+
+### `POST /api/tokens`
+Log a token usage event.
+
+**Request:**
+```json
+{
+  "tool": "web-search",
+  "model": "claude-sonnet-4-6",
+  "tokens_in": 1500,
+  "tokens_out": 3200,
+  "session_id": "agent:main:signal:direct:+15303386428"
+}
+```
+
+**Response 201:** `{ "ok": true, "id": 42 }`
+
+---
+
+### `POST /api/registry/process`
+Optional: register a PID explicitly (only needed for processes not autodiscovered).
+
+**Request:**
+```json
+{
+  "pid": 12345,
+  "name": "chrome",
+  "group": "openclaw-browser",
+  "description": "Headless Chrome for web scraping"
+}
+```
+
+**Response 201:** `{ "ok": true, "registered": 1709712000 }`
+
+---
+
+### `GET /api/metrics`
+Query time-series resource data.
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `from` | unix ts | required | Start of range |
+| `to` | unix ts | now | End of range |
+| `group` | string | all | Filter by group |
+| `resolution` | string | `auto` | `raw`, `hourly`, `daily` |
+| `include_idle` | bool | true | Include idle heartbeat rows |
+
+Auto resolution: `< 6h` → raw, `6h–3d` → hourly, `> 3d` → daily.
+
+**Response 200:**
+```json
+{
+  "data": [
+    { "ts": 1709712000, "grp": "openclaw-core", "cpu_pct": 34.2, "mem_rss_mb": 512.3, "sample_interval_s": 1, "is_idle_heartbeat": 0 },
+    { "ts": 1709712000, "grp": "net", "net_in_kb": 120.5, "net_out_kb": 45.2, "sample_interval_s": 1, "is_idle_heartbeat": 0 },
+    { "ts": 1709712000, "grp": "gpu", "gpu_util_pct": 82.0, "gpu_vram_used_mb": 18432.0, "gpu_power_w": 220.5, "sample_interval_s": 1, "is_idle_heartbeat": 0 }
+  ],
+  "count": 3,
+  "resolution": "raw"
+}
+```
+
+---
+
+### `GET /api/metrics/stream`
+SSE live feed. Emits one event per fast-loop write (activity-gated or 60s idle heartbeat).
+
+**Event format:**
+```
+data: {"ts":1709712000,"groups":{"openclaw-core":{"cpu_pct":34.2,"mem_rss_mb":512.3},"openclaw-browser":{"cpu_pct":12.1,"mem_rss_mb":1024.0}},"net":{"in_kb":120.5,"out_kb":45.2},"gpu":{"util_pct":82.0,"vram_used_mb":18432.0,"power_w":220.5},"is_idle_heartbeat":false}
+```
+
+---
+
+### `GET /api/disk`
+Query disk usage history.
+
+**Query params:** `from`, `to`, `dir_key` (optional filter).
+
+**Response 200:**
+```json
+{
+  "data": [
+    { "ts": 1709712000, "dir_key": "openclaw-sessions", "size_bytes": 524288000, "file_count": 1423 },
+    { "ts": 1709712000, "dir_key": "openclaw-total", "size_bytes": 612000000, "file_count": 1680 }
+  ]
+}
+```
+
+---
+
+### `GET /api/tags`
+Query tag history.
+
+**Query params:** `from`, `to`, `category` (optional filter), `source` (optional filter).
+
+**Response 200:**
+```json
+{
+  "tags": [
+    { "id": 7, "ts": 1709712000, "category": "conversation", "text": "Signal: David about claw-monitor", "source": "openclaw", "session_id": "agent:main:..." }
+  ]
+}
+```
+
+---
+
+### `GET /api/tokens/summary`
+Aggregate token usage.
+
+**Query params:** `from` (default 24h ago), `to`, `group_by` (`tool`|`model`|`session_id`).
+
+**Response 200:**
+```json
+{
+  "summary": [
+    { "tool": "web-search", "total_in": 45000, "total_out": 120000, "call_count": 23, "est_cost_usd": 6.20 }
+  ],
+  "totals": { "tokens_in": 45000, "tokens_out": 120000, "calls": 23, "est_cost_usd": 6.20 }
+}
+```
+
+---
+
+## Dashboard Pages
+
+### `/` — Live Overview
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  🔭 CLAW MONITOR              [Live ●]  [Last: 2s ago]      │
+│  "to help right-size the machine"                            │
+├────────────┬────────────┬──────────┬──────────┬─────────────┤
+│  CPU        │  Memory    │  GPU      │  Network  │  Disk      │
+│  ████░ 62%  │  5.2/64GB  │  82% GPU │ ↓1.2MB/s  │ 612MB used │
+│  [spark]    │  [spark]   │  18.4GB  │ ↑340KB/s  │ +2MB today │
+│             │            │  VRAM    │  [spark]  │            │
+├────────────┴────────────┴──────────┴──────────┴─────────────┤
+│  CPU by Group — Last 30 min (stacked area + tag overlays)   │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  [■ conversation]  [■ agent]  [■ idle]                │  │
+│  │  ████▒▒░░░░░░░░░████████████░░░░░░░░░░░░░░░░░░░░░░░  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  Memory — Last 30 min                                        │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  ████████████████████████████████████████████████████  │  │
+│  └────────────────────────────────────────────────────────┘  │
+├──────────────────────────────────────────────────────────────┤
+│  GPU — Last 30 min                                           │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  GPU util:  ░░░░░░░░░░░░░░░░░████████████░░░░░░░░░░░  │  │
+│  │  VRAM:      ░░░░░░░░░░░░░░░░░█████████████████████░░  │  │
+│  └────────────────────────────────────────────────────────┘  │
+├──────────────────────────────────────────────────────────────┤
+│  Recent Tags                                                  │
+│  06:33 [conversation] Signal: David claw-monitor design      │
+│  07:14 [conversation] Signal: David design review round 2    │
+│                                             [→ Full timeline]│
+├──────────────────────────────────────────────────────────────┤
+│  Today's Token Usage   1.2M in / 3.4M out  Est. $4.20       │
+│  Top tool: web-search (42 calls, $2.10)    [→ Full breakdown]│
+├──────────────────────────────────────────────────────────────┤
+│  Disk (openclaw-total): 612 MB  Sessions: 524 MB  (+2MB/day)│
+│                                             [→ Disk detail]  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- All time-series charts use time-scale x-axis (handles sparse idle gaps correctly)
+- Tag overlays: colored bands between consecutive tags; vertical lines at tag boundaries
+- `[Live ●]` turns red if SSE disconnects; reconnects automatically
+
+---
+
+### `/metrics` — Time-Series Explorer
+
+Full date-range explorer with CPU, memory, GPU, and network charts. Recharts brush selection for zoom. Group filter. Resolution auto or manual. Tag overlays on all charts. Tooltip shows sample_interval_s to indicate data density at any point.
+
+---
+
+### `/disk` — Storage Detail
+
+Timeline chart of `openclaw-total` growth. Stacked bar showing breakdown by subdirectory (sessions, workspace, media, logs, monitor-db). Sessions directory growth rate highlighted as key metric for disk sizing. Table of latest snapshot values per directory.
+
+---
+
+### `/tokens` — Token Usage
+
+Date range selector. Summary stats. By-tool table (sortable). By-model donut chart. Daily bar chart. Session dropdown (filter by session_id). All costs computed client-side from raw counts + pricing.json.
+
+---
+
+### `/processes` — Process Registry
+
+Live process table with alive/dead status. Group breakdown donut. Description tooltips. Active/all filter.
+
+---
+
+### `/tags` — Tag Log
+
+Full tag history with filter by category and source. Timeline view showing tag periods as colored spans. David can add manual tags from this page.
 
 ---
 
@@ -452,398 +708,155 @@ CREATE INDEX idx_token_events_tool ON token_events(tool);
 
 ```
 ~/work/claw-monitor/
-├── README.md                     ← this file (design document)
-├── HISTORY.md                    ← decision log / change log
-├── schema.sql                    ← SQLite schema (run once to initialize DB)
+├── README.md                       ← design document (this file)
+├── HISTORY.md                      ← decision log / attribution log
+├── schema.sql                      ← run once to initialize SQLite DB
 │
 ├── claw-collector/
-│   ├── collector.py              ← main daemon entry point, core 10s loop
-│   ├── db.py                     ← SQLite helpers (open with WAL, insert, retention cleanup)
-│   ├── pid_tracker.py            ← /proc-based PID walker, comm verification, auto-grouping
-│   ├── net_tracker.py            ← /proc/net/dev reader, delta computation
-│   └── claw-collector.service   ← systemd user unit file
+│   ├── collector.py                ← main daemon: fast loop + slow loop
+│   ├── db.py                       ← SQLite helpers (WAL open, insert, retention)
+│   ├── pid_tracker.py              ← /proc PID walker, comm verification, auto-grouping
+│   ├── net_tracker.py              ← /proc/net/dev delta computation
+│   ├── gpu_tracker.py              ← pynvml wrapper (init, read, close)
+│   ├── disk_tracker.py             ← os.walk() directory size scanner
+│   ├── config.py                   ← DISK_DIRS config, thresholds, DB path
+│   └── claw-collector.service      ← systemd user unit
 │
 ├── web/
 │   ├── package.json
-│   ├── next.config.ts            ← port: 7432, standalone output
+│   ├── next.config.ts              ← port 7432, standalone output
 │   ├── tsconfig.json
-│   ├── claw-web.service          ← systemd user unit file
+│   ├── claw-web.service            ← systemd user unit
 │   └── src/
-│       ├── middleware.ts         ← Tailscale IP guard (100.64.0.0/10 + 127.0.0.1)
+│       ├── middleware.ts           ← Tailscale IP guard
 │       ├── lib/
-│       │   ├── db.ts             ← better-sqlite3 singleton (WAL mode)
-│       │   ├── pricing.json      ← model → {input_per_mtok, output_per_mtok}
-│       │   └── cost.ts           ← cost computation helper
+│       │   ├── db.ts               ← better-sqlite3 singleton (WAL)
+│       │   ├── pricing.json        ← model → cost per mtok
+│       │   └── cost.ts             ← cost computation helper
 │       ├── app/
-│       │   ├── layout.tsx        ← Radix UI Theme wrapper, nav sidebar
-│       │   ├── page.tsx          ← / Live Overview
-│       │   ├── metrics/
-│       │   │   └── page.tsx      ← /metrics Time-Series Explorer
-│       │   ├── tokens/
-│       │   │   └── page.tsx      ← /tokens Token Usage Breakdown
-│       │   ├── processes/
-│       │   │   └── page.tsx      ← /processes Process Registry
+│       │   ├── layout.tsx          ← Radix Theme wrapper + nav
+│       │   ├── page.tsx            ← / Live Overview
+│       │   ├── metrics/page.tsx    ← /metrics Time-Series Explorer
+│       │   ├── disk/page.tsx       ← /disk Storage Detail
+│       │   ├── tokens/page.tsx     ← /tokens Token Usage
+│       │   ├── processes/page.tsx  ← /processes Registry
+│       │   ├── tags/page.tsx       ← /tags Tag Log
 │       │   └── api/
-│       │       ├── registry/
-│       │       │   └── process/
-│       │       │       └── route.ts  ← POST /api/registry/process
-│       │       ├── registry/
-│       │       │   └── route.ts      ← GET /api/registry
-│       │       ├── metrics/
-│       │       │   ├── route.ts      ← GET /api/metrics
-│       │       │   └── stream/
-│       │       │       └── route.ts  ← GET /api/metrics/stream (SSE)
-│       │       └── tokens/
-│       │           ├── route.ts      ← POST /api/tokens
-│       │           └── summary/
-│       │               └── route.ts  ← GET /api/tokens/summary
+│       │       ├── tags/route.ts                  ← POST + GET /api/tags
+│       │       ├── tokens/route.ts                ← POST /api/tokens
+│       │       ├── tokens/summary/route.ts        ← GET /api/tokens/summary
+│       │       ├── registry/process/route.ts      ← POST /api/registry/process
+│       │       ├── registry/route.ts              ← GET /api/registry
+│       │       ├── metrics/route.ts               ← GET /api/metrics
+│       │       ├── metrics/stream/route.ts        ← GET /api/metrics/stream (SSE)
+│       │       └── disk/route.ts                  ← GET /api/disk
 │       └── components/
-│           ├── MetricSparkline.tsx   ← small Recharts LineChart
-│           ├── CpuAreaChart.tsx      ← stacked area chart (Recharts)
-│           ├── TokenTable.tsx        ← Radix UI Table, sortable
-│           ├── ProcessTable.tsx      ← Radix UI Table with alive/dead badge
-│           ├── LiveIndicator.tsx     ← SSE connection status dot
-│           └── CostBadge.tsx         ← formats est. USD cost
+│           ├── MetricSparkline.tsx
+│           ├── CpuAreaChart.tsx          ← stacked area, tag overlays
+│           ├── GpuChart.tsx              ← util + VRAM dual-axis line chart
+│           ├── DiskChart.tsx             ← stacked bar by directory
+│           ├── NetworkChart.tsx          ← in/out line chart
+│           ├── TokenTable.tsx
+│           ├── TagOverlay.tsx            ← renders colored bands on charts
+│           ├── TagLog.tsx                ← recent tags list
+│           ├── ProcessTable.tsx
+│           ├── LiveIndicator.tsx
+│           └── CostBadge.tsx
 │
 └── scripts/
-    └── register-tool.sh          ← OpenClaw integration helper
+    ├── tag.sh                      ← OpenClaw integration: post a tag
+    └── register-tool.sh            ← OpenClaw integration: register a PID (optional)
 ```
 
 ---
 
-## OpenClaw → Monitor Integration Protocol
-
-### Registering a New Process
-
-When OpenClaw spawns a new agent/tool process:
-
-```bash
-# Fire-and-forget PID registration (non-blocking)
-curl -sf \
-  -X POST http://localhost:7432/api/registry/process \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"pid\": ${NEW_PID},
-    \"name\": \"$(cat /proc/${NEW_PID}/comm 2>/dev/null || echo unknown)\",
-    \"group\": \"openclaw-agent\",
-    \"description\": \"${TOOL_NAME}\"
-  }" &
-```
-
-- **Timing:** Called once immediately after process spawn
-- **`&`**: Non-blocking — OpenClaw does not wait for a response
-- **`-sf`**: Silent + fail fast — no output, no retries, no hanging
-- **name field**: Should match `/proc/<pid>/comm` — collector uses this to detect PID reuse
-
-### Logging Token Usage
-
-After each LLM tool call completes:
-
-```bash
-# Fire-and-forget token event (non-blocking)
-curl -sf \
-  -X POST http://localhost:7432/api/tokens \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"tool\": \"${TOOL_NAME}\",
-    \"model\": \"${MODEL_ID}\",
-    \"tokens_in\": ${TOKENS_IN},
-    \"tokens_out\": ${TOKENS_OUT},
-    \"session_id\": \"${SESSION_ID}\"
-  }" &
-```
-
-- **Timing:** Called once per tool call completion, after usage metadata is available
-- **Not called** on tool call failure (no tokens consumed)
-- **session_id:** Identifies the agent session (e.g., `agent:main:signal:direct:+15303386428`)
-
-### Helper Script: `scripts/register-tool.sh`
-
-```
-Usage:
-  register-tool.sh process <pid> <name> <group> [description]
-  register-tool.sh tokens <tool> <model> <tokens_in> <tokens_out> [session_id]
-
-Examples:
-  register-tool.sh process 12345 chrome openclaw-browser "Headless Chrome"
-  register-tool.sh tokens web-search claude-sonnet-4-6 1500 3200 agent-7a3b
-```
-
-The script validates arguments and always exits 0, regardless of whether claw-monitor is reachable. It constructs the JSON and fires the appropriate curl command.
-
-### Failure Modes
-
-| Scenario | Impact |
-|---|---|
-| Monitor not running when process registered | curl fails silently. Collector auto-discovers OpenClaw PIDs via /proc scan on its next bootstrap. |
-| Monitor not running when tokens logged | That tool call's token count is permanently missing from totals. Acceptable. |
-| PID dies before registration is processed | API inserts the row; collector marks it `unregistered` on its next tick when `/proc/<pid>` is gone. |
-| PID reused by unrelated process | Collector detects `/proc/<pid>/comm` mismatch, marks old row `unregistered`, ignores new process. |
-| SQLite write contention | WAL mode serializes concurrent writes with ~millisecond waits. No data loss. |
-
----
-
-## Dashboard Wireframes
-
-### `/` — Live Overview
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  🦞 CLAW MONITOR                [Live ●] [Last: 2s ago]   │
-├───────────────┬─────────────────┬──────────────────────────┤
-│  CPU           │  Memory          │  Network                │
-│  ████████░ 62% │  1.8 / 64 GB    │  ↓ 1.2 MB/s ↑ 340KB/s │
-│  [sparkline]   │  [sparkline]     │  [sparkline]           │
-├───────────────┴─────────────────┴──────────────────────────┤
-│  CPU by Group — Last 30 minutes (stacked area chart)       │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  ██████ openclaw-core  ████ browser  ██ agent  █ sys │  │
-│  └──────────────────────────────────────────────────────┘  │
-├────────────────────────────────────────────────────────────┤
-│  Memory by Group — Last 30 minutes                         │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  ████████████ openclaw-browser  ██████ core  ██ agent│  │
-│  └──────────────────────────────────────────────────────┘  │
-├────────────────────────────────────────────────────────────┤
-│  Today's Token Usage                                        │
-│  1.2M in / 3.4M out  │  Est. cost: $4.20  │  89 calls     │
-│  Top tool: web-search (42 calls, $2.10)                    │
-│                                      [→ Full breakdown]    │
-├────────────────────────────────────────────────────────────┤
-│  Active Processes: 12 tracked                              │
-│  openclaw-core: 3  │  browser: 4  │  agent: 5             │
-│                                      [→ View registry]    │
-└────────────────────────────────────────────────────────────┘
-```
-
-- Sparklines: last 30 minutes (180 data points from SSE history)
-- All data auto-refreshes via SSE (~10s)
-- `[Live ●]` turns red if SSE disconnects; reconnects automatically
-- Cost computed client-side from raw token counts + pricing.json
-
----
-
-### `/metrics` — Time-Series Explorer
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  Metrics Explorer                                           │
-│  [📅 2026-02-28] → [📅 2026-03-06]  [Group: All ▼]       │
-│  [Resolution: Auto ▼]   [Refresh: Paused | Live]          │
-├────────────────────────────────────────────────────────────┤
-│  CPU % — Stacked Area Chart                                 │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │100%│                                                  │  │
-│  │    │  ▓▓▓░░░░░░░▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░  │  │
-│  │ 50%│  ████░░░░░░███████░░░░░░░░░░░░░░░░░░░░░░░░░░░  │  │
-│  │  0%│──────────────────────────────────────────────── │  │
-│  └──────────────────────────────────────────────────────┘  │
-│  [Brush: drag to zoom into a time range]                   │
-├────────────────────────────────────────────────────────────┤
-│  Memory RSS — Stacked Area Chart                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ 4GB│  ████████████████████████████████████████████   │  │
-│  │ 2GB│  ████████████████████████████████████████████   │  │
-│  │  0 │──────────────────────────────────────────────── │  │
-│  └──────────────────────────────────────────────────────┘  │
-├────────────────────────────────────────────────────────────┤
-│  Network I/O — Machine Level (Line Chart)                   │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ ↓ in  ━━━━╱╲━━━━╱╲╱╲━━━━━━━━━━━━╱╲╱╲╱╲━━━━━━━━━━  │  │
-│  │ ↑ out ────╱╲────╱╲╱╲────────────╱╲╱╲╱╲────────────  │  │
-│  └──────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────┘
-```
-
-- Resolution auto-selects based on date range (raw/hourly/daily)
-- Hover tooltip shows exact value at any timestamp
-- Brush selection to zoom; double-click to reset
-- Group filter hides/shows individual groups in stacked charts
-
----
-
-### `/tokens` — Token Usage Breakdown
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  Token Usage         [Today | 7d | 30d | Custom 📅]        │
-├────────────────────────────────────────────────────────────┤
-│  5.2M in  /  12.8M out  /  Est. cost: $18.40  /  312 calls│
-├────────────────────────────────────────────────────────────┤
-│  By Tool  (sortable table)                                  │
-│  ┌────────────┬───────┬─────────┬──────────┬─────────────┐ │
-│  │ Tool       │ Calls │ Tok In  │ Tok Out  │  Est. Cost  │ │
-│  ├────────────┼───────┼─────────┼──────────┼─────────────┤ │
-│  │ web-search │  42   │  1.2M   │   3.4M   │    $6.20    │ │
-│  │ exec       │  31   │  0.9M   │   2.8M   │    $5.10    │ │
-│  │ read       │  28   │  0.6M   │   1.8M   │    $3.20    │ │
-│  │ image-gen  │  11   │  0.3M   │   0.8M   │    $1.90    │ │
-│  └────────────┴───────┴─────────┴──────────┴─────────────┘ │
-├────────────────────────────────────────────────────────────┤
-│  By Model (donut chart + legend)                            │
-│  ◉ claude-sonnet-4-6  72%  $13.20                          │
-│  ◎ claude-haiku-4-5   18%   $1.80                          │
-│  ◎ gpt-4o-mini        10%   $3.40                          │
-├────────────────────────────────────────────────────────────┤
-│  Token Usage Over Time (daily bar chart)                    │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  ████░ ████░ ██░░ ████░ ████░ ████░ ████░           │  │
-│  │  M 2/28 3/1  3/2  3/3   3/4   3/5   3/6            │  │
-│  │  ░=tokens_in  █=tokens_out                          │  │
-│  └──────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────┘
-```
-
-- All costs computed client-side from raw counts + pricing.json
-- Table columns sortable by any field
-- "Pricing as of YYYY-MM-DD" note shown under summary
-
----
-
-### `/processes` — Process Registry
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  Process Registry              [Show: Active ▼]  [Refresh] │
-├────────────────────────────────────────────────────────────┤
-│  12 tracked  │  10 alive  │  2 recently dead               │
-├────────────────────────────────────────────────────────────┤
-│  ┌──────┬─────────┬─────────────────┬────────┬──────────┐  │
-│  │ PID  │ Name    │ Group           │ Status │ Since    │  │
-│  ├──────┼─────────┼─────────────────┼────────┼──────────┤  │
-│  │12345 │ chrome  │ openclaw-browser│ ● live │ 3h ago   │  │
-│  │12346 │ node    │ openclaw-core   │ ● live │ 3h ago   │  │
-│  │12400 │ python3 │ openclaw-agent  │ ● live │ 12m ago  │  │
-│  │12101 │ curl    │ openclaw-agent  │ ○ dead │ 45m ago  │  │
-│  └──────┴─────────┴─────────────────┴────────┴──────────┘  │
-├────────────────────────────────────────────────────────────┤
-│  Group Breakdown (donut chart)                              │
-│  ◉ openclaw-browser  4    ◎ openclaw-core  3               │
-│  ◎ openclaw-agent    5    ◎ dead           2               │
-└────────────────────────────────────────────────────────────┘
-```
-
-- `● live` / `○ dead` computed by API (checks `/proc/<pid>` at query time)
-- Dead processes shown with muted style; auto-hidden in "Active" view
-- Clicking a row shows description tooltip
-
----
-
-## Startup / Deployment Steps
+## Deployment
 
 ### Prerequisites
 
-- Python 3.10+
-- Node.js 20+
-- SQLite 3.35+ (for WAL mode)
+- Python 3.10+, pip
+- Node.js 20+, npm
+- SQLite 3.35+
+- NVIDIA drivers + NVML library (`nvidia-smi` available)
 - systemd (user scope)
 - Tailscale active
 
-### Step-by-Step
+### Steps
 
 ```bash
-# 1. Create database directory
+# 1. Create DB directory
 mkdir -p ~/.openclaw/claw-monitor/
 
-# 2. Initialize SQLite DB
+# 2. Initialize DB
 sqlite3 ~/.openclaw/claw-monitor/metrics.db < schema.sql
-# schema.sql sets PRAGMA journal_mode=WAL and creates all tables
 
-# 3. Install Python collector dependencies
+# 3. Install Python deps
 cd ~/work/claw-monitor/claw-collector
-pip install --user psutil
-# sqlite3 is Python stdlib — no extra install needed
+pip install --user psutil nvidia-ml-py3
 
-# 4. Install Node.js web dependencies
+# 4. Build Next.js
 cd ~/work/claw-monitor/web
-npm install
+npm install && npm run build
 
-# 5. Build Next.js for production
-npm run build
-# Output: web/.next/ (standalone mode)
-
-# 6. Install systemd user units
-cp ~/work/claw-monitor/claw-collector/claw-collector.service ~/.config/systemd/user/
-cp ~/work/claw-monitor/web/claw-web.service ~/.config/systemd/user/
-
+# 5. Install systemd units
+cp claw-collector/claw-collector.service ~/.config/systemd/user/
+cp web/claw-web.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now claw-collector.service
-systemctl --user enable --now claw-web.service
+systemctl --user enable --now claw-collector claw-web
 
-# 7. Enable user lingering (so services run without active login)
+# 6. Enable user lingering (services persist without active login)
 loginctl enable-linger $USER
 
-# 8. Verify services
+# 7. Verify
 systemctl --user status claw-collector claw-web
-
-# 9. Verify API
 curl -s http://localhost:7432/api/registry | jq .
 
-# 10. Verify Tailscale access (from this machine)
-curl -s http://dw-asus-linux.tail3eef35.ts.net:7432/api/registry | jq .
-# Then open http://dw-asus-linux.tail3eef35.ts.net:7432 in a browser from any Tailscale peer
+# 8. Dashboard (from any Tailscale device)
+open http://dw-asus-linux.tail3eef35.ts.net:7432
 ```
 
-### systemd Unit Structure (both services)
-
-Both units:
-- Run as `[Service] Type=simple`
-- Set `Restart=always`, `RestartSec=5`
-- Set `Nice=10` for the collector (low priority)
-- Use `WantedBy=default.target`
-- Log to journald (use `journalctl --user -u claw-collector -f` to tail)
-- **No dependency ordering needed** — services are independent; they share SQLite but don't need each other to be running.
-
-### Day-to-Day Operations
+### Day-to-Day Ops
 
 ```bash
-# Tail collector logs
-journalctl --user -u claw-collector -f
-
-# Tail web logs
-journalctl --user -u claw-web -f
-
-# Restart after code changes
-systemctl --user restart claw-collector
-systemctl --user restart claw-web
-
-# Check both at once
-systemctl --user status claw-*
+journalctl --user -u claw-collector -f   # collector logs
+journalctl --user -u claw-web -f          # web logs
+systemctl --user restart claw-collector   # after collector changes
+systemctl --user restart claw-web         # after web changes
+systemctl --user status claw-*            # both at once
 ```
 
 ---
 
 ## Port & Networking
 
-| Service | Port | Bind | Notes |
+| Service | Port | Bind | Access |
 |---|---|---|---|
-| Next.js web | 7432 | 0.0.0.0 | Accessible on all interfaces |
-| Tailscale | — | — | Exposes 7432 to all tailnet peers |
-
-Access from any Tailscale device: `http://dw-asus-linux.tail3eef35.ts.net:7432`
-
-**Not exposed to public internet** — Tailscale acts as the auth boundary. Middleware adds IP range validation as defense-in-depth.
+| Next.js web + API | 7432 | 0.0.0.0 | `http://dw-asus-linux.tail3eef35.ts.net:7432` |
 
 ---
 
-## Open Questions (Resolved)
+## Open Questions (All Resolved)
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Python vs Rust for collector? | **Python** — I/O-bound, not CPU-bound. psutil handles /proc robustly. Rust saves nothing measurable here. |
-| 2 | Token cost tracking: raw counts or compute USD? | **Raw counts only** — compute USD in dashboard via `pricing.json`. Pricing changes too often to bake into DB. |
-| 3 | Data retention policy? | **14 days full-res, daily aggregates forever** — ~35 MB for 14 days. Daily sufficient for historical trends. |
-| 4 | Auth on port 7432? | **Tailscale-only + IP range middleware** — 5-line middleware rejects non-Tailscale IPs as defense-in-depth. |
-| 5 | PM2 vs systemd? | **systemd (user scope)** — consistent with collector, no extra deps, better log rotation and status tooling. |
-| 6 | WebSocket vs SSE? | **SSE** — unidirectional data flow, native to Next.js, auto-reconnect built-in, 10s interval means no latency concerns. |
+| 1 | Python vs Rust for collector? | Python — I/O-bound, psutil robust, <300 lines |
+| 2 | Token cost storage? | Raw counts only; compute USD via pricing.json at query time |
+| 3 | Data retention? | 14 days full-res, daily aggregates forever |
+| 4 | Auth? | Tailscale + IP range middleware |
+| 5 | PM2 vs systemd? | systemd user scope |
+| 6 | WebSocket vs SSE? | SSE |
+| 7 | Fixed vs adaptive interval? | 1s sweep always; write gated on activity or 60s idle heartbeat |
+| 8 | GPU included? | Yes — pynvml, machine-level, grp='gpu' |
+| 9 | Disk monitoring? | Yes — 60s slow loop, per-directory, exclude ~/work/claw-monitor |
+| 10 | Tagging system? | Yes — POST /api/tags, overlays on all charts, manual + automatic |
 
 ---
 
 ## Not In Scope (v1)
 
-- GPU usage monitoring (RTX 3090 available — v2 candidate)
-- Per-PID network I/O (requires libpcap or eBPF — v2)
-- Alert/notification system (e.g., "CPU > 90% for 5 min")
+- Per-PID network I/O (requires libpcap or eBPF — v2 candidate)
+- Per-process GPU attribution (requires NVIDIA MIG or cgroups — v2)
+- Alert / notification system
 - Multi-machine monitoring
 - Per-request latency tracking
-- Authentication beyond Tailscale + IP guard
+- Authentication beyond Tailscale + IP middleware
