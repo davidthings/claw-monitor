@@ -4,6 +4,145 @@ Comprehensive test plan covering the Python collector daemon, Next.js API routes
 
 ---
 
+## 0. Running the Tests
+
+### 0.1 How to Run
+
+**Python unit tests (collector):**
+```bash
+cd ~/work/claw-monitor/claw-collector
+pip install --user psutil nvidia-ml-py3 pytest pytest-mock
+CM_DB_PATH=/tmp/claw-test.db python -m pytest tests/ -v
+```
+
+**Next.js unit tests (API routes):**
+```bash
+cd ~/work/claw-monitor/web
+npm install
+CM_DB_PATH=/tmp/claw-test.db npx vitest run
+```
+
+**Integration/functional tests (requires live services):**
+```bash
+# Start test instances (separate DB and port from production)
+export CM_DB_PATH=/tmp/claw-test-$(date +%s).db
+export CM_PORT=17432
+export CM_SLOW_LOOP_INTERVAL_S=1
+
+sqlite3 $CM_DB_PATH < ~/work/claw-monitor/schema.sql
+
+# Start test collector (separate from production systemd service)
+python3 ~/work/claw-monitor/claw-collector/collector.py &
+COLLECTOR_PID=$!
+
+# Start test web server
+cd ~/work/claw-monitor/web && npm run start &
+WEB_PID=$!
+
+sleep 3  # let services start
+
+# Run integration tests
+python -m pytest ~/work/claw-monitor/tests/integration/ -v --timeout=60
+
+# Teardown
+kill $COLLECTOR_PID $WEB_PID
+```
+
+**Full suite:**
+```bash
+# Run all: unit + integration (integration requires services running as above)
+python -m pytest claw-collector/tests/ tests/integration/ -v
+cd web && npx vitest run
+```
+
+**Coverage report:**
+```bash
+# Python
+pip install pytest-cov
+python -m pytest claw-collector/tests/ --cov=claw-collector --cov-report=term-missing
+
+# Next.js
+npx vitest run --coverage
+```
+
+### 0.2 How to Interpret Results
+
+- **PASSED** — test ran and assertions held. No action needed.
+- **FAILED** — assertion failed or unexpected exception. See §0.4 for fix workflow.
+- **ERROR** — test itself threw an error before assertions (setup/teardown problem, import error, missing fixture). Fix test infrastructure first before treating as a code bug.
+- **SKIPPED** — test has a `@pytest.mark.skipif` or `@pytest.mark.gpu` marker and the condition was not met (e.g. no GPU, not on Linux). Expected in CI. Not a failure.
+- **xFAIL** — test was expected to fail and did. OK.
+- **xPASS** — test was expected to fail but passed. Investigate — the feature may now work or the test expectation is stale.
+
+**Coverage output:** The coverage report shows line-level misses. Focus on the critical paths listed in §5.2 first. Lines in exception handlers and signal handlers missing coverage are generally acceptable (see §5.3).
+
+**Common expected flakes:**
+- SSE ping tests that use real timers (35s wait) may time out in slow environments — rerun once before treating as a failure
+- `/proc`-based tests may fail if `openclaw-gateway` is not running — check with `pgrep openclaw-gateway` first
+- `test_cpu_percent_matches_top` is inherently noisy — a single flake is acceptable; consistent failure is a bug
+
+**Reading a failure:**
+```
+FAILED claw-collector/tests/test_pid_tracker.py::test_find_gateway_pid_finds_matching_process
+AssertionError: Expected PID 42, got None
+```
+The test file, test name, and assertion message together tell you what broke. Check whether:
+1. The test's mock/fixture is wrong (test bug)
+2. The implementation behaviour changed (code bug)
+3. An environment assumption is violated (infra issue)
+
+### 0.3 How to Interpret Coverage
+
+- Run with `--cov-report=term-missing` to see which lines are uncovered
+- Lines shown as missing: check if they're in §5.2 (must-have 100%) or §5.3 (acceptable to skip)
+- A miss in a critical path (resolveTs, isTailscaleOrLocal, verify_pid, write-gate) is a gap that must be addressed
+- A miss in a signal handler or GPU teardown path is acceptable
+
+### 0.4 How to Fix Failures — The Workflow
+
+This is the structured process for turning test failures into fixes:
+
+**Step 1 — Run and collect failures**
+Run the full test suite. Capture the failure list:
+```bash
+python -m pytest claw-collector/tests/ tests/integration/ --tb=short 2>&1 | tee test-results.txt
+cd web && npx vitest run 2>&1 | tee -a test-results.txt
+```
+
+**Step 2 — Triage with the user**
+Present the failure list to the user in a readable summary:
+```
+Failures found (N total):
+1. [FAILED] test_find_gateway_pid_finds_matching_process — assertion: expected PID, got None
+2. [ERROR]  test_collector_status_updated_every_60s — ImportError: no module psutil
+3. [FAILED] test_tags_post_backdate_iso8601 — expected ts=1741262400, got 1741262401
+...
+
+Which of these do you want to fix? (You can say "all", name specific ones, or say "skip X")
+```
+**Do not start fixing anything until the user has responded.**
+
+**Step 3 — Generate a fix plan**
+For each approved failure, produce a fix plan entry:
+```
+Fix plan:
+1. test_find_gateway_pid_finds_matching_process
+   - Root cause: [diagnosis]
+   - Fix: [what to change — file, function, line]
+   - Risk: [low/medium/high — does the fix affect production behaviour?]
+
+2. test_collector_status_updated_every_60s
+   - Root cause: psutil not installed in test environment
+   - Fix: add psutil to test requirements / CI setup
+   - Risk: low (test infra only)
+```
+**Present the plan to the user and wait for approval before implementing.**
+
+**Step 4 — Implement fixes**
+Only after user approval: implement the fixes, re-run the affected tests, confirm they pass, commit.
+
+---
+
 ## 1. Unit Tests — Python Collector (`claw-collector/`)
 
 **Framework:** pytest
@@ -201,6 +340,13 @@ Comprehensive test plan covering the Python collector daemon, Next.js API routes
 - Mock `subprocess.run` to raise `subprocess.TimeoutExpired`
 - Assert returns `None`
 
+#### `test_scan_configured_dirs_handles_nonexistent_gracefully`
+- Configure DISK_DIRS with one real path and one nonexistent path
+- Call the slow-loop disk scan function
+- Assert: real path produces a valid row
+- Assert: nonexistent path produces a row with size_bytes=0, file_count=0 (or is skipped gracefully — document which behaviour is expected)
+- Assert: no exception raised
+
 ### 1.5 `db.py`
 
 #### `test_open_db_creates_directory_and_sets_wal`
@@ -253,6 +399,12 @@ Comprehensive test plan covering the Python collector daemon, Next.js API routes
 - Insert metrics with timestamps older than `RETENTION_DAYS`
 - Call again, assert old metrics are deleted from `metrics`
 
+#### `test_run_daily_aggregation_day_boundary`
+- Insert metric rows with timestamps spanning midnight (e.g., 23:59:00 and 00:01:00 UTC on consecutive days)
+- Run daily aggregation
+- Assert: two separate rows in metrics_daily for the two calendar dates
+- Assert: rows are not merged across the day boundary
+
 ### 1.6 `collector.py` — `CpuTracker` class
 
 #### `test_cpu_tracker_first_call_returns_none`
@@ -302,6 +454,23 @@ Comprehensive test plan covering the Python collector daemon, Next.js API routes
 #### `test_fast_loop_includes_net_and_gpu_rows`
 - CPU active, mock net_delta to return `(10.0, 20.0)`, mock GPU data
 - Assert inserted rows include grp `"net"` and grp `"gpu"` entries
+
+#### `test_fast_loop_sample_interval_s_correctness`
+- Mock time so two consecutive writes are exactly 5s apart
+- Assert: the inserted row has sample_interval_s = 5
+- **Rationale:** sample_interval_s is used by the dashboard to distinguish burst vs sustained activity; incorrect values mislead the UI.
+
+#### `test_write_gate_transition_idle_to_active`
+- First 3 iterations: all OpenClaw PIDs return CPU% = 0.5% (below threshold, no writes)
+- 4th iteration: one PID returns CPU% = 5% (above threshold, write triggered)
+- Assert: exactly 1 row written (only on the 4th iteration)
+- Assert: sample_interval_s reflects the elapsed time since before the idle period, not just 1s
+
+#### `test_write_gate_transition_active_to_idle`
+- First 3 iterations: active (CPU% = 5%, writes happening)
+- 4th iteration: CPU% drops to 0.5%
+- Assert: no row written on 4th iteration
+- Assert: collector_status.last_seen still updates via slow loop during idle
 
 ---
 
@@ -805,6 +974,68 @@ Standalone unit tests for the cost computation helper. These test `estimateCost(
 #### `test_backdate_iso_db_check`
 - POST with `ts: "2026-03-06T12:00:00Z"`
 - Assert: `ts` equals `1741262400` (or whatever the exact epoch is)
+
+### 3.5 Collector Overhead Measurement
+
+These tests verify that claw-monitor does not significantly compete with OpenClaw or Qwen for resources.
+
+#### `test_collector_cpu_overhead_idle`
+- Start the collector subprocess pointing at a test DB
+- Let it run for 30s with OpenClaw idle (no activity → write-gate closed, fast loop just reading /proc)
+- Measure the collector's own CPU% by reading /proc/<collector_pid>/stat at start and end
+- Assert: average CPU% < 1.0% during idle period
+- **Note:** Nice +10 (SCHED_OTHER) means the collector yields to other processes, but the raw ticks should still be measurable.
+
+#### `test_collector_ram_overhead`
+- Start the collector subprocess
+- After 10s of steady-state operation, read VmRSS from /proc/<collector_pid>/status
+- Assert: RSS < 50MB
+- **Rationale:** Python + psutil + pynvml + sqlite should comfortably fit in <50MB; if this fails, a memory leak or unbounded data structure is likely.
+
+#### `test_collector_cpu_overhead_active`
+- Trigger sustained OpenClaw activity (write-gate open, DB writes every 1s)
+- Measure collector's CPU% during this period
+- Assert: average CPU% < 5% during active period (writes every 1s are expected to cost more than idle)
+- **Note:** The collector runs at nice +10, so even 5% raw usage will appear lower to other processes.
+
+#### `test_web_server_idle_ram`
+- With the web server running but no dashboard clients connected
+- Read /proc/<web_pid>/status
+- Assert: RSS < 200MB (Next.js standalone build should be well under this)
+
+#### `test_web_server_request_cpu`
+- Make 10 rapid sequential requests to /api/metrics with a 30-min range
+- Measure CPU% during the requests
+- Assert: no single request causes CPU% > 50% sustained for more than 2s
+- **Rationale:** A slow DB query on a large metrics table could spike CPU; this catches regressions.
+
+### 3.6 Non-OpenClaw Process Isolation
+
+These tests verify that processes outside the openclaw-gateway tree are never tracked, never appear in the metrics table, and never open the write-gate.
+
+#### `test_external_process_not_in_registry`
+- Start a known external process: `python3 -c "import time; time.sleep(30)"` as a standalone subprocess (NOT a child of openclaw-gateway)
+- Run collector sync_processes()
+- Assert: the subprocess PID does not appear in process_registry
+- Assert: the subprocess is not in any tracked group
+
+#### `test_external_high_cpu_does_not_open_write_gate`
+- Start a CPU-intensive standalone process: `python3 -c "while True: pass"` (NOT a child of openclaw-gateway)
+- Ensure OpenClaw is idle (CPU% ≤ 1%)
+- Run the collector fast loop for 10 iterations
+- Assert: zero rows written to metrics table
+- **Rationale:** The write-gate key check is "any OpenClaw PID CPU% > 1%". An external process burning 100% CPU must not trigger writes.
+
+#### `test_external_process_metrics_not_written`
+- Repeat `test_external_high_cpu_does_not_open_write_gate` with the external process explicitly registered via POST /api/registry/process with group="openclaw-agent" (simulating a mis-registration)
+- Even though the PID is in the registry, if it's not in the gateway child tree, the collector's verify_pid() should catch the comm mismatch or the PID should be rejected at registration time
+- Assert: either the registration is rejected OR the process's CPU does not open the write-gate
+- **Note:** This test exposes a potential gap: if an external PID is manually mis-registered, does it affect the write-gate? The current write-gate logic uses "any openclaw PID" — clarify whether the gate uses pids from process_registry or only autodiscovered gateway-tree pids.
+
+#### `test_only_gateway_tree_gets_group_attribution`
+- With the collector running, verify that all rows in metrics have grp values in the known set: openclaw-core, openclaw-browser, openclaw-agent, net, gpu
+- Assert: no row has grp = NULL or grp outside the allowed set
+- Assert: every non-net, non-gpu row's cpu_pct can be traced to a PID in the gateway tree
 
 ---
 
