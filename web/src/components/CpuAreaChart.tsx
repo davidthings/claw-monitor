@@ -4,13 +4,8 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 
-interface DataPoint {
-  ts: number;
-  [key: string]: number | undefined;
-}
-
 interface Props {
-  data: DataPoint[];
+  data: Record<string, number>[];
   groups?: string[];
 }
 

@@ -22,22 +22,18 @@ export async function GET(request: NextRequest) {
      GROUP BY ${col}`
   ).all(Number(from), Number(to)) as Array<Record<string, unknown>>;
 
-  const summary = rows.map((row) => ({
-    ...row,
-    est_cost_usd: estimateCost(
-      String(row.model || ""),
-      Number(row.total_in || 0),
-      Number(row.total_out || 0)
-    ),
-  }));
-
   let totalIn = 0, totalOut = 0, totalCalls = 0, totalCost = 0;
-  for (const s of summary) {
-    totalIn += Number(s.total_in || 0);
-    totalOut += Number(s.total_out || 0);
-    totalCalls += Number(s.call_count || 0);
-    totalCost += s.est_cost_usd;
-  }
+  const summary = rows.map((row) => {
+    const tIn = Number(row.total_in || 0);
+    const tOut = Number(row.total_out || 0);
+    const calls = Number(row.call_count || 0);
+    const cost = estimateCost(String(row.model || ""), tIn, tOut);
+    totalIn += tIn;
+    totalOut += tOut;
+    totalCalls += calls;
+    totalCost += cost;
+    return { ...row, est_cost_usd: cost };
+  });
 
   return NextResponse.json({
     summary,
