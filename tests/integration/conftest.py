@@ -65,18 +65,16 @@ def collector_process(integration_db, tmp_path):
 
 @pytest.fixture
 def web_server(integration_db):
-    """Start the Next.js standalone server with test DB, wait for HTTP readiness."""
+    """Start the Next.js server with test DB, wait for HTTP readiness."""
     port = find_free_port()
-    standalone_server = os.path.join(WEB_DIR, ".next", "standalone", "server.js")
     env = os.environ.copy()
     env["CM_DB_PATH"] = integration_db
     env["CM_PORT"] = str(port)
     env["PORT"] = str(port)
-    env["HOSTNAME"] = "127.0.0.1"
     env["NODE_ENV"] = "production"
 
     proc = subprocess.Popen(
-        ["node", standalone_server],
+        ["npm", "start"],
         cwd=WEB_DIR,
         env=env,
         stdout=subprocess.PIPE,
