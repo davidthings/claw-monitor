@@ -1,14 +1,15 @@
 [Unit]
-Description=claw-monitor web dashboard (Next.js on port 7432)
+Description=claw-monitor web dashboard (Next.js, port from CM_PORT env)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/work/claw-monitor/web
-ExecStart=/usr/bin/node %h/work/claw-monitor/web/node_modules/.bin/next start -p 7432 -H 0.0.0.0
+ExecStart=/usr/bin/node %h/work/claw-monitor/web/node_modules/.bin/next start -p ${CM_PORT:-7432} -H 0.0.0.0
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
+Environment=CM_PORT=7432
 Environment=PORT=7432
 
 [Install]

@@ -1,5 +1,9 @@
 # claw-monitor
 
+> **Port placeholder:** `CM_PORT` is used throughout this document in place of the actual port number.
+> The default port is `7432`. Set the `CM_PORT` environment variable to override.
+> Configured in: `web/next.config.mjs` (Next.js) and `web/claw-web.service` (systemd).
+
 > **Status: Live** — collector + web dashboard running, systemd-managed.
 
 ---
@@ -59,7 +63,7 @@ Detailed attribution for each decision is in `HISTORY.md`.
 │  ↓ tag POST at session start / work-type change (trivial)   │
 │  ↓ token POST after each LLM tool call (fire-and-forget)    │
 ├─────────────────────────────────────────────────────────────┤
-│  claw-monitor-api  (Next.js API routes, port 7432)          │
+│  claw-monitor-api  (Next.js API routes, port CM_PORT)          │
 │  ├── /api/tags           ← work-type tag ingestion          │
 │  ├── /api/tokens         ← token event ingestion            │
 │  ├── /api/registry       ← (optional) explicit PID hints    │
@@ -259,7 +263,7 @@ journald logs for OpenClaw services tracked via `journalctl --disk-usage` (one s
 ### 2. `web/` — Next.js app (TypeScript)
 
 - **Framework:** Next.js 14 (App Router), React, Radix UI Themes, Recharts
-- **Port:** **7432** (permanent, bound to 0.0.0.0)
+- **Port:** **CM_PORT** (permanent, bound to 0.0.0.0)
 - **Process manager:** `claw-web.service` (systemd user scope)
 - **DB access:** `better-sqlite3` (synchronous, WAL mode)
 
@@ -319,7 +323,7 @@ Tags annotate the timeline with human-readable context. They appear as colored o
 
 ```bash
 # Fire-and-forget (background, silent failure)
-curl -sf -X POST http://localhost:7432/api/tags \
+curl -sf -X POST http://localhost:CM_PORT/api/tags \
   -H 'Content-Type: application/json' \
   -d '{"category":"conversation","text":"Answering user question about system design","source":"clawbot"}' &
 ```
@@ -351,7 +355,7 @@ Tagging requires OpenClaw to remember to call the API at the right moments. Here
 After each LLM API call that returns token usage metadata, OpenClaw fires:
 
 ```bash
-curl -sf -X POST http://localhost:7432/api/tokens \
+curl -sf -X POST http://localhost:CM_PORT/api/tokens \
   -H 'Content-Type: application/json' \
   -d "{\"tool\":\"web-search\",\"model\":\"claude-sonnet-4-6\",\"tokens_in\":1500,\"tokens_out\":3200,\"session_id\":\"${SESSION_ID}\"}" &
 ```
@@ -788,7 +792,7 @@ Full tag history with filter by category and source. Timeline view showing tag p
 │
 ├── web/
 │   ├── package.json
-│   ├── next.config.ts              ← port 7432, standalone output
+│   ├── next.config.ts              ← port CM_PORT, standalone output
 │   ├── tsconfig.json
 │   ├── claw-web.service            ← systemd user unit
 │   └── src/
@@ -873,10 +877,10 @@ loginctl enable-linger $USER
 
 # 7. Verify
 systemctl --user status claw-collector claw-web
-curl -s http://localhost:7432/api/registry | jq .
+curl -s http://localhost:CM_PORT/api/registry | jq .
 
 # 8. Dashboard (from any Tailscale device)
-open http://dw-asus-linux.tail3eef35.ts.net:7432
+open http://dw-asus-linux.tail3eef35.ts.net:CM_PORT
 ```
 
 ### Day-to-Day Ops
@@ -895,7 +899,7 @@ systemctl --user status claw-*            # both at once
 
 | Service | Port | Bind | Access |
 |---|---|---|---|
-| Next.js web + API | 7432 | 0.0.0.0 | `http://dw-asus-linux.tail3eef35.ts.net:7432` |
+| Next.js web + API | CM_PORT | 0.0.0.0 | `http://dw-asus-linux.tail3eef35.ts.net:CM_PORT` |
 
 ---
 

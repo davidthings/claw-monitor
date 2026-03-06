@@ -464,4 +464,83 @@ The effective `ts` stored in the DB **is** the adjusted/backdated time — not t
 
 ---
 
+## 2026-03-06 — GitHub Fine-Grained PAT for claw-monitor (09:26 PST)
+
+**Who did what:** David provided a new fine-grained PAT scoped to the claw-monitor repo only. DavidBot configured the remote.
+
+- Remote switched from SSH (`git@github.com:...`) to HTTPS with token embedded in URL
+- Token stored at `~/.openclaw/claw-monitor-github-token`
+- Token is NOT added to `~/.git-credentials` (would grant general github.com access) — lives only in the remote URL, same pattern as openclaw-workspace
+- Repo confirmed clean and up to date with origin before starting test work
+
+---
+
+## 2026-03-06 — Test Planning Task Initiated (09:34 PST)
+
+**Who did what:** David requested the test plan. DavidBot authored the task brief and spawned claw-monitor-builder. Claude Code will do the reading and writing.
+
+### Motivation
+The codebase was implemented largely by Claude Code under light supervision. There is currently no test coverage. Before any further feature work, David wants a thorough test plan that can be handed to a developer (human or AI) for implementation.
+
+### Requirements
+- Unit tests and functional tests
+- Emphasise **coverage** — name every test case, what it asserts, what it mocks
+- Functional tests must exercise **real data collection behaviour** from the running system — not just mocked logic
+- **No implementation yet** — plan only
+
+### Scope
+1. Python unit tests — all collector modules (pid_tracker, net_tracker, gpu_tracker, disk_tracker, db, collector fast/slow loop)
+2. Next.js API unit tests — all 8 routes + middleware IP guard + resolveTs() backdating all 5 formats
+3. Functional / integration tests — write-gate behaviour, collector_status liveness, SSE stream, end-to-end tag.sh → DB → API roundtrip
+4. Test infrastructure — framework choices, SQLite isolation, /proc mock strategy, GPU/CI handling, coverage targets
+
+### Participants
+- **DavidBot** — orchestrator; authored task brief; owns HISTORY update
+- **claw-monitor-builder** — subagent managing Claude Code planning session
+- **Claude Code** — reads all source files; produces TEST_PLAN.md
+
+### Output
+`~/work/claw-monitor/TEST_PLAN.md` — pending completion
+
+---
+
+## 2026-03-06 — Test Plan Review + Port Placeholder + Multi-Instance Support (09:50 PST)
+
+**Who did what:** DavidBot reviewed TEST_PLAN.md, spotted gaps. David reviewed and added requirements. DavidBot authored task brief and re-spawned claw-monitor-builder to address them.
+
+### Issues to Address in TEST_PLAN.md
+1. `cost.ts` has no standalone test section — add `cost.test.ts` explicitly
+2. SSE tests assume DB polling in the route — flag this assumption; plan should note it needs verification
+3. Slow-loop 60s wait tests need a `time.sleep` mock strategy for fast unit test alternatives
+4. Full test suite review for any other areas of concern
+
+### New Requirement: Multi-Instance / Test Isolation
+Tests will run **alongside a live running instance** of claw-monitor. This means:
+- Every configurable resource must be parameterisable: DB path, port, collector config
+- No test should hardcode the default DB path (`~/.openclaw/claw-monitor/metrics.db`) or port (7432)
+- Each test run gets its own temp SQLite DB
+- Web app must be startable on an alternate port for integration tests
+- Collector must be pointable at an alternate DB path
+- TEST_PLAN.md must reflect this throughout — test infrastructure section needs a full isolation strategy
+
+### New Requirement: Port Placeholder in Docs
+Port `7432` is hardcoded throughout README.md, INSTRUCTIONS.md, and possibly other docs. This is fragile.
+- Introduce placeholder **`CM_PORT`** (short, unambiguous) to replace all hardcoded `7432` references in docs
+- At the top of each affected file, add a short explanation: what `CM_PORT` means and where the actual value is configured
+- Code/config files (next.config.mjs, systemd units, scripts) should use an environment variable `CM_PORT` with `7432` as the default
+- TEST_PLAN.md: all test port references use `CM_PORT` or the test-instance env var pattern
+
+### Participants
+- **DavidBot** — orchestrator; HISTORY author
+- **claw-monitor-builder** — subagent directing Claude Code
+- **Claude Code** — edits TEST_PLAN.md and all affected docs
+
+### Output
+- Updated `TEST_PLAN.md`
+- Updated `README.md` (port placeholder + explanation)
+- Updated `INSTRUCTIONS.md` (port placeholder + explanation)
+- Any other doc files with hardcoded 7432
+
+---
+
 *Future entries appended below as the project progresses.*

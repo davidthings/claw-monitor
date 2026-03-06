@@ -1,5 +1,9 @@
 # claw-monitor — Instructions
 
+> **Port placeholder:** `CM_PORT` is used throughout this document in place of the actual port number.
+> The default port is `CM_PORT`. Set the `CM_PORT` environment variable to override.
+> Configured in: `web/next.config.mjs` (Next.js) and `web/claw-web.service` (systemd).
+
 ---
 
 ## Quick Overview
@@ -15,7 +19,7 @@ It tracks:
 - **Tokens** — LLM token consumption per tool call (reported by clawbot)
 - **Tags** — work-type annotations so resource charts can be interpreted in context
 
-Data is stored in SQLite. A Next.js dashboard is served on a permanent port (default **7432**) accessible from any Tailscale-linked device.
+Data is stored in SQLite. A Next.js dashboard is served on a permanent port (default **CM_PORT**) accessible from any Tailscale-linked device.
 
 The collector is activity-gated: it writes data only when OpenClaw is active, so idle periods (overnight, etc.) produce no rows and no overhead. A single-row liveness table is updated every 60 seconds so the dashboard can distinguish intentional idle gaps from collector downtime.
 
@@ -66,13 +70,13 @@ loginctl enable-linger $USER
 systemctl --user status claw-collector claw-web
 
 # 9. Confirm the API is responding
-curl -s http://localhost:7432/api/registry | head -c 200
+curl -s http://localhost:CM_PORT/api/registry | head -c 200
 ```
 
 ### Dashboard Access
 
-- **Locally:** `http://localhost:7432`
-- **Over Tailscale:** `http://<hostname>.tail<id>.ts.net:7432`
+- **Locally:** `http://localhost:CM_PORT`
+- **Over Tailscale:** `http://<hostname>.tail<id>.ts.net:CM_PORT`
 
 The dashboard is protected by IP-range middleware that only allows Tailscale CGNAT addresses (100.64.0.0/10) and localhost. No additional authentication is required.
 
