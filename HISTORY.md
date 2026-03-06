@@ -13,44 +13,115 @@ David Williams requested a lightweight OpenClaw resource monitor. The project wa
 - Dynamic process registration: OpenClaw fires a trivial one-shot API call when it starts using a new tool/agent/OS utility
 - No LLM/AI involvement in the monitor itself
 - Low-priority daemon (does not compete with Qwen or OpenClaw)
-- Web dashboard: Next.js + Vite + React + Radix UI Themes
+- Web dashboard: Next.js + React + Radix UI Themes + Recharts
 - Permanent port, accessible from all Tailscale-linked devices
 - Data stored in a database (SQLite chosen for simplicity)
 - Design-first: **no code until David approves the plan**
 
 ### Participants
 - **DavidBot** (OpenClaw main session) — orchestrator, author of initial README/HISTORY
-- **claw-monitor-builder** — spawned subagent managing Claude Code
-- **Claude Code** — implementation agent (planning mode only until approval)
+- **claw-monitor-builder** — spawned subagent managing Claude Code planning session
+- **Claude Code** — architecture reviewer (planning mode only until approval)
 
-### Decisions Made (initial design)
-- **Port:** 7432 (permanent, PM2-managed)
+### Initial Design Decisions
+- **Port:** 7432 (permanent, systemd-managed)
 - **Collector language:** Python 3 + psutil (simplest for v1; Rust rewrite possible later)
 - **Database:** SQLite (no infra overhead; better-sqlite3 in Next.js, sqlite3 in Python)
 - **API:** REST (Next.js API routes) — simple, debuggable, easy for shell curl calls
 - **Dashboard:** Next.js App Router + Radix UI Themes + Recharts
 - **OpenClaw integration:** fire-and-forget `curl ... &` shell call, wrapped in `scripts/register-tool.sh`
-- **Live updates:** SSE (Server-Sent Events) at 10s refresh
+- **Live updates:** SSE (Server-Sent Events) at ~10s refresh
 - **Tailscale access:** `http://dw-asus-linux.tail3eef35.ts.net:7432`
 
-### Open Questions (pending David's review)
-1. Python vs Rust for collector?
-2. Token cost tracking (raw counts only, or compute USD in dashboard)?
-3. Data retention policy (suggest: 7 days full-res, forever hourly)?
-4. Auth on port 7432 (suggest: Tailscale-only, no app auth)?
-5. PM2 vs systemd for Next.js process manager?
-6. SSE vs WebSocket for dashboard live updates?
+---
 
-### Status
+## 2026-03-06 — Claude Code Architecture Review
+
+### Session Summary
+Claude Code reviewed the initial architecture and provided detailed analysis, component specifications, and recommendations on all open questions.
+
+### Architecture Issues Identified and Resolved
+
+#### 1. PID Reuse (Critical Correctness Bug)
+**Problem:** Linux recycles PIDs. Original schema used `pid INTEGER PRIMARY KEY` — if an OpenClaw process died and an unrelated process got the same PID, the collector would attribute the wrong process's resources to OpenClaw. Worse, the new registration would collide with the old DB row.
+
+**Fix:**
+- `process_registry` table now uses `id INTEGER PRIMARY KEY AUTOINCREMENT` (not `pid`)
+- `pid` is a regular column with a non-unique index
+- Collector verifies `/proc/<pid>/comm` matches the registered `name` before trusting a PID
+- If comm mismatch detected → marks old row `unregistered`, ignores new (unrelated) process
+
+#### 2. Per-PID Network I/O Not Feasible
+**Problem:** Original design referenced `/proc/<pid>/net/dev` for per-PID network accounting. That file shows per-interface stats for the entire network namespace, not per-PID.
+
+**Per-PID net requires:** Either netfilter/cgroups (heavy) or libpcap + /proc correlation (complex).
+
+**Fix:** Network I/O collected machine-wide from `/proc/net/dev`. Stored in dedicated rows where `grp='machine'`. Per-group net columns removed from the schema. v2 candidate for per-PID net (cgroups or eBPF).
+
+#### 3. CPU Percentage Needs Delta Calculation
+**Problem:** `/proc/<pid>/stat` gives cumulative CPU ticks, not percentages. CPU% must be computed from delta between two readings: `(ticks_now - ticks_prev) / (elapsed_s * cpu_count)`.
+
+**Implication:** The first sample after PID registration has no CPU data. `cpu_pct` is NULL for that row. Documented as expected behavior.
+
+#### 4. SQLite WAL Mode Required for Concurrent Access
+**Problem:** Python collector writes every 10s; Next.js API reads concurrently. Without WAL mode, this causes `SQLITE_BUSY` errors under load.
+
+**Fix:** Both Python and Node.js must explicitly set `PRAGMA journal_mode=WAL` when opening the database. Added to schema.sql (applied on init) and documented in both component specs.
+
+#### 5. Wrong API Path in File Layout
+**Problem:** README showed `src/api/` but Next.js App Router puts API routes at `src/app/api/`.
+
+**Fix:** Corrected to `src/app/api/` throughout.
+
+#### 6. Token Events Lacked Session Correlation
+**Problem:** No way to answer "how many tokens did session X consume?" — no `session_id` field.
+
+**Fix:** Added `session_id TEXT` column to `token_events`. Optional field; matches OpenClaw session format (e.g., `agent:main:signal:direct:+15303386428`).
+
+### Open Questions — Resolved
+
+| Question | Decision | Rationale |
+|---|---|---|
+| Python vs Rust for collector? | **Python** | I/O-bound operation; psutil handles /proc robustly; <200 lines; Rust saves nothing measurable |
+| Token cost storage? | **Raw counts only** | Pricing changes frequently (3x in 18 months); compute USD in dashboard via `pricing.json`; drop `cost_usd` column from schema |
+| Data retention? | **14 days full-res, daily aggregates forever** | ~35 MB for 14 days (10s/6 groups/50 bytes); daily sufficient for historical trends older than 1 month; changed from 7 days to 14 days |
+| Auth on port 7432? | **Tailscale + IP range middleware** | Tailscale = network auth; add 5-line middleware rejecting requests outside 100.64.0.0/10 and 127.0.0.1 as defense-in-depth |
+| PM2 vs systemd? | **systemd (user scope)** | Collector already uses systemd; consistent tooling; no extra deps; native log rotation; `systemctl --user status claw-*` shows both |
+| WebSocket vs SSE? | **SSE** | Unidirectional push; native to Next.js; `EventSource` auto-reconnects; 10s interval means no latency need for WebSocket |
+
+### Schema Changes (vs. initial design)
+
+1. `process_registry`: PK changed from `pid` to autoincrement `id`; `pid` becomes regular indexed column
+2. `token_events`: `cost_usd` column dropped; `model` made `NOT NULL`; `session_id TEXT` column added
+3. New `metrics_daily` table added for long-term aggregates
+4. `metrics` table: network columns (`net_in_kb`, `net_out_kb`) only populated on rows where `grp='machine'`; removed from per-group rows
+
+### New Content Added to README
+
+- Detailed collector core loop (pseudocode)
+- PID auto-grouping rules table
+- Known limitations section
+- Full API specification with request/response schemas for all 6 endpoints
+- Complete file layout with per-file descriptions
+- OpenClaw integration protocol (exact curl commands, timing, format)
+- Failure mode table
+- Dashboard wireframes (ASCII) for all 4 pages
+- Step-by-step deployment instructions
+- systemd unit structure notes
+- Day-to-day operations commands
+
+### Status After Planning Session
 - [x] Repo created by David
-- [x] README.md written (architecture, schema, file layout)
+- [x] README.md written (initial architecture)
 - [x] HISTORY.md started
-- [ ] Claude Code planning session — in progress
-- [ ] David reviews plan
-- [ ] Implementation approved
-- [ ] Build
-- [ ] Test
-- [ ] Deploy
+- [x] Claude Code architecture review complete
+- [x] All open questions resolved with recommendations
+- [x] README.md expanded with full design detail
+- [x] HISTORY.md updated with all decisions
+- [ ] **David reviews and approves plan** ← current step
+- [ ] Implementation begins
+- [ ] Testing
+- [ ] Deployment
 
 ---
 
