@@ -137,15 +137,15 @@ The Overview page makes the following API calls on load, then subscribes to SSE 
 
 ---
 
-### Open Questions
+### Design Decisions (resolved)
 
-1. **Y-axis strategy** — Multi-axis (CPU left, Network right, GPU right)? Or accept mixed-scale with a clear legend? Recharts supports dual Y-axis natively; more than two gets awkward. Recommendation: CPU + Memory on left axis (both expressed naturally), GPU% + Network on right axis (both dimensionally similar as activity indicators).
+1. **Y-axis strategy** — CPU + Memory on the left axis; GPU% + Network on the right axis. Tokens on the right axis alongside GPU (both are activity-rate indicators). Recharts dual Y-axis handles this cleanly.
 
-2. **Token line data** — Token events are sparse and tied to LLM calls, not a continuous time series. The chart line shows tokens/min (same unit as the stat card), bucketed on the client side by the chart's time resolution. Sparse periods show as 0 or gap. Alternative: show as a **bar series** since events are discrete — may read more naturally than a mostly-flat line with occasional spikes.
+2. **Token line** — Shown as a **smoothed line** (e.g. Recharts `type="monotone"` with a rolling average applied on the client). Bucketed to the chart's time resolution; sparse periods interpolate smoothly rather than dropping to zero.
 
-3. **Tag clustering threshold** — At what pixel distance should tags be clustered? Suggest 8px.
+3. **Tag clustering threshold** — 8px. Tags within 8px of each other on the time axis are grouped into a cluster marker with a count badge. Hovering the cluster shows a stacked list of all tags in the group.
 
-4. **Time range default** — Last 2 hours is proposed. Is this right for typical use? The write-gate means sparse data during idle periods — a 2h range will often be mostly empty. Consider defaulting to "last active session" or "last 4 hours".
+4. **Time range** — Selectable, using the **same range picker as the Metrics page** (e.g. Last 30m / 1h / 2h / 6h / 24h / custom). No hardcoded default — persist the last-used range in `localStorage`.
 
 ---
 
