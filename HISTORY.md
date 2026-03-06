@@ -388,4 +388,28 @@ These are collector or display calculation bugs, not data collection bugs. Data 
 
 ---
 
+## 2026-03-06 — First-Run Bug Fixes (08:07 PST)
+
+**Who did what:** David spotted the bugs from the first-run screenshot. DavidBot diagnosed and fixed them directly (no Claude Code involvement — targeted frontend fix).
+
+### Bug 1: CPU stat card showing ~27,892%
+
+**Root cause:** `page.tsx` was accumulating `latestCpu` across every row in the 30-minute window (up to 1800 rows × N groups). A single row with cpu_pct=50 across 600 active rows = 30,000%.
+
+**Fix:** Compute summary stats from only the most recent timestamp's rows (`latestTs`). Changed display from "%" to "cores" (cpu_pct_sum / 100), which is cleaner for a sizing tool — "OpenClaw is using 2.4 cores right now" is more actionable than a % that can legitimately exceed 100% on multi-threaded workloads.
+
+### Bug 2: Memory showing ~1,130 GB
+
+**Root cause:** Same accumulation bug. Memory was summed across all 1800 rows, then divided by 1024 to "convert to GB". 600 rows × 2,000 MB each = 1,200,000 MB ÷ 1024 = ~1,172 GB.
+
+The collector was reading VmRSS correctly — the data in the DB was always right.
+
+**Fix:** Same pattern — only sum `mem_rss_mb` from rows at `latestTs`. Label updated to "RSS (now)" for clarity.
+
+### Files changed
+- `web/src/app/page.tsx` — fixed accumulation logic, changed CPU display to "cores", updated labels
+- `web/` rebuilt and `claw-web.service` restarted
+
+---
+
 *Future entries appended below as the project progresses.*

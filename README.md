@@ -885,6 +885,23 @@ systemctl --user status claw-*            # both at once
 
 ---
 
+## Known Issues / Bug Fixes
+
+### Fixed 2026-03-06: CPU% and Memory summary stat display bugs
+
+**Root cause:** `page.tsx` was accumulating `latestCpu` and `latestMem` across every row returned for the last 30 minutes (up to ~1800 rows × N groups), instead of using only the most recent timestamp's rows for the point-in-time summary cards.
+
+- **CPU symptom:** Stat card showed ~27,892% — 30 min of rows × all groups summed together
+- **Memory symptom:** Stat card showed ~1,130 GB — same accumulation bug, then divided by 1024 to "convert to GB"
+
+**Fix (frontend only — collector data was correct):**
+- Find `latestTs = max(row.ts)` across all returned rows
+- Filter to only `rows where ts === latestTs` for stat card values
+- CPU display changed to **"X.XX cores"** (sum of cpu_pct / 100), which is more intuitive for sizing questions than a % that can exceed 100% on multi-threaded workloads
+- Memory display correctly reads RSS (VmRSS) in MB, divided by 1024 for GB, labeled "RSS (now)"
+
+---
+
 ## Not In Scope (v1)
 
 - Per-PID network I/O (requires libpcap or eBPF — v2 candidate)

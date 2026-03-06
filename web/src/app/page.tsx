@@ -86,22 +86,31 @@ export default function HomePage() {
   const gpuData: { ts: number; gpu_util_pct?: number; gpu_vram_used_mb?: number }[] = [];
   const netData: { ts: number; net_in_kb?: number; net_out_kb?: number }[] = [];
 
-  let latestCpu = 0, latestMem = 0, latestGpu = 0, latestVram = 0;
+  let latestGpu = 0, latestVram = 0;
+
+  // Find the most recent timestamp for point-in-time summary stats
+  const latestTs = metrics.reduce((max, r) => Math.max(max, r.ts), 0);
 
   for (const row of metrics) {
     if (row.grp === "gpu") {
       gpuData.push({ ts: row.ts, gpu_util_pct: row.gpu_util_pct, gpu_vram_used_mb: row.gpu_vram_used_mb });
-      if (row.gpu_util_pct != null) latestGpu = row.gpu_util_pct;
-      if (row.gpu_vram_used_mb != null) latestVram = row.gpu_vram_used_mb;
+      // Use most recent GPU reading for stat card
+      if (row.ts === latestTs && row.gpu_util_pct != null) latestGpu = row.gpu_util_pct;
+      if (row.ts === latestTs && row.gpu_vram_used_mb != null) latestVram = row.gpu_vram_used_mb;
     } else if (row.grp === "net") {
       netData.push({ ts: row.ts, net_in_kb: row.net_in_kb, net_out_kb: row.net_out_kb });
     } else {
       if (!cpuByTs[row.ts]) cpuByTs[row.ts] = { ts: row.ts };
       cpuByTs[row.ts][row.grp] = row.cpu_pct || 0;
-      if (row.cpu_pct != null) latestCpu += row.cpu_pct;
-      if (row.mem_rss_mb != null) latestMem += row.mem_rss_mb;
     }
   }
+
+  // Summary stats: only sum rows from the most recent timestamp (point-in-time, not 30-min accumulation)
+  const latestRows = metrics.filter(r => r.ts === latestTs && r.grp !== "gpu" && r.grp !== "net");
+  // cpu_pct per process is "% of 1 core" — divide by 100 to express as core equivalents
+  const latestCpuCores = latestRows.reduce((sum, r) => sum + (r.cpu_pct || 0), 0) / 100;
+  const latestMemMb = latestRows.reduce((sum, r) => sum + (r.mem_rss_mb || 0), 0);
+
   const cpuChartData = Object.values(cpuByTs).sort((a, b) => a.ts - b.ts);
 
   const totalDiskMb = disk.reduce((sum, d) => {
@@ -122,13 +131,13 @@ export default function HomePage() {
       <div className="stat-grid" style={{ marginBottom: 16 }}>
         <div className="card">
           <h2>CPU</h2>
-          <div className="stat-value">{latestCpu.toFixed(0)}%</div>
-          <div className="stat-label">OpenClaw total</div>
+          <div className="stat-value">{latestCpuCores.toFixed(2)} cores</div>
+          <div className="stat-label">OpenClaw total (now)</div>
         </div>
         <div className="card">
           <h2>Memory</h2>
-          <div className="stat-value">{(latestMem / 1024).toFixed(1)}GB</div>
-          <div className="stat-label">of 64GB</div>
+          <div className="stat-value">{(latestMemMb / 1024).toFixed(2)}GB</div>
+          <div className="stat-label">of 64GB RSS (now)</div>
         </div>
         <div className="card">
           <h2>GPU</h2>
