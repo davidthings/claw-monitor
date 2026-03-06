@@ -362,4 +362,30 @@ All 6 phases completed in a single session:
 
 ---
 
+## 2026-03-06 — First Run: Overview Page Screenshot (08:05 PST)
+
+**Who did what:** David opened the dashboard and sent a screenshot. DavidBot archived it and noted initial observations.
+
+Screenshot saved: `docs/screenshot-overview-first-run-2026-03-06.png`
+
+![Overview page — first run](docs/screenshot-overview-first-run-2026-03-06.png)
+
+### What the screenshot shows
+- Dark-themed dashboard, nav: Overview / Metrics / Disk / Tokens / Processes / Tags
+- Tagline "to help right-size the machine" visible under the title ✅
+- Live indicator: **● Live (0s ago)** ✅
+- CPU by Group chart (07:59–08:03 AM) showing heavy activity during the build — openclaw-core (blue), openclaw-browser (orange), openclaw-agent (green). The agent spike (green) correlates with Claude Code running during phases 1–4.
+- GPU: ~40% utilization flat line (VRAM 1.1GB) — likely the idle GPU baseline
+- Network: bursty outbound traffic during the build
+- Recent Tags: `coding — claw-monitor build in progress` ✅ (tag.sh worked)
+- Today's Token Usage: 1K in / 2K out, $0.03 ✅
+
+### Obvious display bugs to fix
+1. **CPU showing 27892%** — summing raw CPU% across all processes/cores without normalizing by CPU count. Should cap at 100% × number of tracked groups, or normalize per-core.
+2. **Memory showing 1130.9GB of 64GB** — almost certainly summing virtual memory (VSZ) instead of RSS. Should use VmRSS from `/proc/<pid>/status`.
+
+These are collector or display calculation bugs, not data collection bugs. Data is flowing correctly. Fixing in the next round.
+
+---
+
 *Future entries appended below as the project progresses.*
