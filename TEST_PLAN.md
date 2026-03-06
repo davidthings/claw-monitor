@@ -100,46 +100,90 @@ The test file, test name, and assertion message together tell you what broke. Ch
 
 ### 0.4 How to Fix Failures — The Workflow
 
-This is the structured process for turning test failures into fixes:
+This is the structured process for turning test failures or bug reports into fixes.
+
+---
+
+#### For bugs discovered in production (not caught by existing tests)
+
+**This is the mandatory approach. No exceptions.**
+
+**Step 1 — Write a failing test first**
+Before touching any production code, write a test that reproduces the bug:
+- The test should exercise the exact pathway that is broken
+- Run it and confirm it FAILS
+- If it passes, the test is wrong or the bug is not what you think it is — stop and re-diagnose
+
+```bash
+python3 -m pytest tests/path/to/test.py::test_new_test -v
+# Must show FAILED before proceeding
+```
+
+**Step 2 — Fix the production code**
+Now fix the bug. Only change what is necessary to make the failing test pass.
+
+**Step 3 — Confirm the test now passes**
+```bash
+python3 -m pytest tests/path/to/test.py::test_new_test -v
+# Must show PASSED
+```
+
+**Step 4 — Run the full test suite**
+Confirm the fix did not break anything else:
+```bash
+~/work/claw-monitor/run-tests.sh  # unit tests
+# or with integration:
+~/work/claw-monitor/run-tests.sh --integration
+```
+
+**Step 5 — Commit both the test and the fix together**
+```bash
+git add -A
+git commit -m "fix: <description> — add regression test"
+```
+
+The test and the fix go in the same commit. This documents what the bug was and proves it is fixed.
+
+---
+
+#### For test suite failures (existing tests fail after a change)
 
 **Step 1 — Run and collect failures**
-Run the full test suite. Capture the failure list:
 ```bash
-python -m pytest claw-collector/tests/ tests/integration/ --tb=short 2>&1 | tee test-results.txt
+python3 -m pytest claw-collector/tests/ tests/integration/ --tb=short 2>&1 | tee test-results.txt
 cd web && npx vitest run 2>&1 | tee -a test-results.txt
 ```
 
 **Step 2 — Triage with the user**
-Present the failure list to the user in a readable summary:
+Present the failure list in a readable summary:
 ```
 Failures found (N total):
-1. [FAILED] test_find_gateway_pid_finds_matching_process — assertion: expected PID, got None
-2. [ERROR]  test_collector_status_updated_every_60s — ImportError: no module psutil
-3. [FAILED] test_tags_post_backdate_iso8601 — expected ts=1741262400, got 1741262401
+1. [FAILED] test_name — assertion: expected X, got Y
+2. [ERROR]  test_name — ImportError: ...
 ...
 
-Which of these do you want to fix? (You can say "all", name specific ones, or say "skip X")
+Which of these do you want to fix?
 ```
 **Do not start fixing anything until the user has responded.**
 
-**Step 3 — Generate a fix plan**
-For each approved failure, produce a fix plan entry:
+**Step 3 — For each approved failure: diagnose first**
+Determine whether it is:
+- A **test bug** (the test is wrong) — fix the test, no approval needed, but explain what you changed
+- A **code bug** (the implementation is wrong) — follow the production bug workflow above (write failing test variant → fix code → confirm pass)
+- An **infra issue** (missing dep, wrong env) — fix infra, re-run
+
+**Step 4 — Generate a fix plan for code bugs**
 ```
 Fix plan:
-1. test_find_gateway_pid_finds_matching_process
+1. <test_name>
    - Root cause: [diagnosis]
    - Fix: [what to change — file, function, line]
-   - Risk: [low/medium/high — does the fix affect production behaviour?]
-
-2. test_collector_status_updated_every_60s
-   - Root cause: psutil not installed in test environment
-   - Fix: add psutil to test requirements / CI setup
-   - Risk: low (test infra only)
+   - Risk: [low/medium/high]
 ```
-**Present the plan to the user and wait for approval before implementing.**
+Present the plan and **wait for approval** before implementing code fixes.
 
-**Step 4 — Implement fixes**
-Only after user approval: implement the fixes, re-run the affected tests, confirm they pass, commit.
+**Step 5 — Implement and verify**
+Only after approval: fix, re-run affected tests, confirm pass, commit.
 
 ### 0.5 Iterative Implementation Workflow
 
