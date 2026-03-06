@@ -98,7 +98,7 @@ Three agents built and maintain this project:
 | Network I/O | Machine-level only | Per-PID net requires libpcap/cgroups; machine-level from `/proc/net/dev` is sufficient for sizing questions |
 | GPU | Machine-level via pynvml | Can't attribute GPU per-process without cgroups/MIG; machine-level shows Qwen vs idle clearly |
 | DB concurrency | WAL mode | Both Python and Node.js set `PRAGMA journal_mode=WAL`; prevents `SQLITE_BUSY` errors |
-| Sweep vs write | Separate | 1s sweep always; write gated on activity or 60s idle heartbeat |
+| Sweep vs write | Strictly activity-gated | 1s sweep always; write to `metrics` ONLY when OpenClaw CPU% > 1%; zero rows overnight; `collector_status` updated every 60s so dashboard can distinguish idle from crash |
 | Disk stats | Slow loop (60s) | Directory scanning with `os.walk()` is expensive; 60s is fine for storage growth analysis |
 | OpenClaw coupling | Minimal | Collector autodiscovers all PIDs from /proc; OpenClaw only provides tags (work type) and token counts |
 
@@ -116,22 +116,42 @@ Three agents built and maintain this project:
 
 The collector runs two independent loops:
 
-**Fast loop (1s sweep):** Reads CPU%, mem (RSS), net I/O delta, GPU utilization, GPU VRAM. Holds results in memory. Decides whether to write to DB:
-- Write if any tracked OpenClaw process has CPU% > 2% (activity detected)
-- Write if last write was >60s ago (idle heartbeat — confirms "nothing happened", not "data missing")
-- Skip write if below threshold and last write was <60s ago (true idle, no data wasted)
+**Fast loop (1s sweep):** Reads CPU%, mem (RSS), net I/O delta, GPU utilization, GPU VRAM. Holds results in memory. Writes to the `metrics` table **only when activity is detected** — never during idle periods. This means overnight silence produces zero rows, not thousands of zero-value rows.
 
-This means: the DB contains dense data during active periods and one row per 60s during idle. Charts show sparse idle gaps honestly.
+**Slow loop (60s):** Two tasks:
+1. Scans disk directories with `os.walk()`. Writes one `disk_snapshots` row per 60s regardless of activity — disk growth is always tracked.
+2. Updates `collector_status.last_seen` — a single-row table (not appended, just updated). This is how the dashboard knows the collector is alive even when no metrics are being written.
 
-**Slow loop (60s):** Scans disk directories with `os.walk()`. Writes one `disk_snapshots` row per 60s regardless of activity — disk growth is always tracked.
-
-#### Activity Detection Thresholds
+#### Activity Detection: When to Write to `metrics`
 
 | Condition | Action |
 |---|---|
-| Any OpenClaw PID CPU% > 2% | Write fast-loop sample to DB immediately |
-| No OpenClaw activity AND last write < 60s ago | Skip write (true idle) |
-| No OpenClaw activity AND last write ≥ 60s | Write idle heartbeat (marks gap as intentional, not missing data) |
+| Any OpenClaw PID CPU% > 1% | Write fast-loop sample to DB immediately |
+| All OpenClaw PIDs CPU% ≤ 1% | Skip write — no row produced |
+
+That's the entire rule. The `metrics` table contains **only rows where something was happening.** Gaps in the timeline are intentional.
+
+#### Distinguishing Idle from Collector-Down
+
+Without idle heartbeat rows, the dashboard cannot tell the difference between "nothing happened" and "the collector crashed" purely from `metrics` gaps. This is resolved by `collector_status`:
+
+```sql
+-- Single-row table. Always UPDATE, never INSERT after init.
+CREATE TABLE collector_status (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),  -- enforces single row
+  last_seen  INTEGER NOT NULL,                     -- unix timestamp, updated every 5 min
+  started_at INTEGER NOT NULL                      -- timestamp of last collector startup
+);
+```
+
+The collector updates `last_seen` every 5 minutes regardless of activity. The dashboard interprets timeline gaps as:
+
+| Gap duration | `last_seen` during gap? | Interpretation |
+|---|---|---|
+| Any length | Yes (last_seen falls within gap) | ✅ Intentional idle — collector was running, nothing to report |
+| Any length | No (last_seen before gap starts) | ⚠️ Collector was down — show warning banner |
+
+Dashboard shows idle gaps as a muted grey region. Collector-down gaps show an amber warning. No ambiguity, and zero wasted disk rows overnight.
 
 #### Fast Loop — Core Logic
 
@@ -141,7 +161,8 @@ On startup:
   2. Bootstrap: scan /proc/*/cmdline to find openclaw-gateway PID
      Walk child tree to discover all children; auto-assign groups
   3. Init pynvml; open GPU handle for device 0 (RTX 3090)
-  4. last_write_ts = 0
+  4. INSERT OR REPLACE INTO collector_status (id, last_seen, started_at) VALUES (1, now, now)
+  5. last_write_ts = 0
 
 Every 1 second:
   1. Reload process_registry from DB (catch new API registrations)
@@ -154,18 +175,19 @@ Every 1 second:
   4. Read /proc/net/dev → compute net in/out delta since last tick
   5. Read GPU: gpu_util_pct, vram_used_mb, power_w via pynvml
   6. Determine whether to write:
-     active = any_openclaw_pct > 2.0
-     elapsed = now - last_write_ts
-     should_write = active OR elapsed >= 60
-  7. If should_write:
-     INSERT rows into metrics (one per group, plus 'net' row, plus 'gpu' row)
-     Set sample_interval_s = elapsed (actual elapsed seconds since last write)
-     last_write_ts = now
+     active = any_openclaw_pct > 1.0
+     If active:
+       INSERT rows into metrics (one per group, plus 'net' row, plus 'gpu' row)
+       Set sample_interval_s = (now - last_write_ts)
+       last_write_ts = now
+     Else:
+       No write — fast loop goes back to sleep
 
 Every 60 seconds (slow loop, runs concurrently):
   1. Scan configured directories with os.walk(); record total size in bytes
   2. INSERT one row per directory into disk_snapshots
-  3. Daily: INSERT into metrics_daily; DELETE old rows from metrics (>14 days)
+  3. UPDATE collector_status SET last_seen = now WHERE id = 1
+  4. Daily: INSERT into metrics_daily; DELETE old rows from metrics (>14 days)
 
 On SIGTERM: clean shutdown, close GPU handle, close DB
 ```
@@ -386,7 +408,7 @@ Tags appear as:
 ```sql
 PRAGMA journal_mode=WAL;
 
--- Fast-loop time-series (written on activity or 60s idle heartbeat)
+-- Fast-loop time-series (written ONLY when OpenClaw activity detected — never during idle)
 CREATE TABLE metrics (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   ts                INTEGER NOT NULL,
@@ -398,8 +420,15 @@ CREATE TABLE metrics (
   gpu_util_pct      REAL,                -- only set when grp='gpu'
   gpu_vram_used_mb  REAL,                -- only set when grp='gpu'
   gpu_power_w       REAL,                -- only set when grp='gpu'
-  sample_interval_s INTEGER NOT NULL,    -- actual elapsed seconds since last write (not target interval)
-  is_idle_heartbeat INTEGER DEFAULT 0    -- 1 = written as idle heartbeat (no activity), 0 = active data
+  sample_interval_s INTEGER NOT NULL     -- actual elapsed seconds since last write (shows burst vs sustained)
+);
+
+-- Single-row collector liveness table (always UPDATE, never INSERT after init)
+-- Used by the dashboard to distinguish idle gaps from collector-down gaps
+CREATE TABLE collector_status (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),  -- enforces single row
+  last_seen  INTEGER NOT NULL,                     -- updated every 60s by slow loop
+  started_at INTEGER NOT NULL                      -- set on collector startup
 );
 CREATE INDEX idx_metrics_ts ON metrics(ts);
 CREATE INDEX idx_metrics_grp_ts ON metrics(grp, ts);
@@ -472,8 +501,9 @@ CREATE INDEX idx_tags_ts ON tags(ts);
 ### Schema Design Notes
 
 - **`process_registry.id` is autoincrement PK** (not `pid`) — handles Linux PID reuse correctly
-- **`is_idle_heartbeat`** flag distinguishes "nothing happening" from "data missing" in charts
-- **`sample_interval_s`** records actual elapsed time, not target — dashboard shows data density
+- **`metrics` contains only active rows** — no idle heartbeat rows; gaps are truly empty
+- **`collector_status`** (single row, updated every 60s) lets dashboard distinguish idle gaps from collector-down gaps
+- **`sample_interval_s`** records actual elapsed time since last write — shows whether activity was a brief spike or sustained
 - **`cost_usd` not stored** — computed at query time from raw token counts + pricing.json
 - **`disk_snapshots`** is always written at 60s regardless of activity (disk growth needs continuous tracking)
 - **`metrics` grp='gpu'** is machine-level (not per-process); GPU use by Qwen is visible without attribution
@@ -568,10 +598,12 @@ Auto resolution: `< 6h` → raw, `6h–3d` → hourly, `> 3d` → daily.
 ### `GET /api/metrics/stream`
 SSE live feed. Emits one event per fast-loop write (activity-gated or 60s idle heartbeat).
 
-**Event format:**
+**Event format (only emitted when activity detected):**
 ```
-data: {"ts":1709712000,"groups":{"openclaw-core":{"cpu_pct":34.2,"mem_rss_mb":512.3},"openclaw-browser":{"cpu_pct":12.1,"mem_rss_mb":1024.0}},"net":{"in_kb":120.5,"out_kb":45.2},"gpu":{"util_pct":82.0,"vram_used_mb":18432.0,"power_w":220.5},"is_idle_heartbeat":false}
+data: {"ts":1709712000,"groups":{"openclaw-core":{"cpu_pct":34.2,"mem_rss_mb":512.3},"openclaw-browser":{"cpu_pct":12.1,"mem_rss_mb":1024.0}},"net":{"in_kb":120.5,"out_kb":45.2},"gpu":{"util_pct":82.0,"vram_used_mb":18432.0,"power_w":220.5},"sample_interval_s":1}
 ```
+
+During idle periods the SSE connection stays open but no `data:` events are emitted. The `[Live ●]` indicator stays green (connection is alive); charts simply show no new data points. A separate `ping:` keep-alive frame is sent every 30s to prevent proxy timeouts.
 
 ---
 
@@ -668,9 +700,10 @@ Aggregate token usage.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- All time-series charts use time-scale x-axis (handles sparse idle gaps correctly)
+- All time-series charts use time-scale x-axis (handles sparse active data correctly)
+- Gaps in charts: cross-referenced against `collector_status.last_seen` — grey = intentional idle, amber warning = collector was down
 - Tag overlays: colored bands between consecutive tags; vertical lines at tag boundaries
-- `[Live ●]` turns red if SSE disconnects; reconnects automatically
+- `[Live ●]` stays green during idle (SSE connection open, just no data events); turns red only if connection drops; reconnects automatically
 
 ---
 
@@ -719,7 +752,7 @@ Full tag history with filter by category and source. Timeline view showing tag p
 │   ├── net_tracker.py              ← /proc/net/dev delta computation
 │   ├── gpu_tracker.py              ← pynvml wrapper (init, read, close)
 │   ├── disk_tracker.py             ← os.walk() directory size scanner
-│   ├── config.py                   ← DISK_DIRS config, thresholds, DB path
+│   ├── config.py                   ← DISK_DIRS config, thresholds (CPU% activity threshold), DB path
 │   └── claw-collector.service      ← systemd user unit
 │
 ├── web/
@@ -845,7 +878,7 @@ systemctl --user status claw-*            # both at once
 | 4 | Auth? | Tailscale + IP range middleware |
 | 5 | PM2 vs systemd? | systemd user scope |
 | 6 | WebSocket vs SSE? | SSE |
-| 7 | Fixed vs adaptive interval? | 1s sweep always; write gated on activity or 60s idle heartbeat |
+| 7 | Fixed vs adaptive interval? | 1s sweep always; write to `metrics` ONLY on activity (CPU > 1%); zero rows during idle; `collector_status` pings every 60s to indicate liveness |
 | 8 | GPU included? | Yes — pynvml, machine-level, grp='gpu' |
 | 9 | Disk monitoring? | Yes — 60s slow loop, per-directory, exclude ~/work/claw-monitor |
 | 10 | Tagging system? | Yes — POST /api/tags, overlays on all charts, manual + automatic |

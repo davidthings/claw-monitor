@@ -278,4 +278,46 @@ David asked: "Just to confirm you are putting the history of this design process
 
 ---
 
+## 2026-03-06 — Adaptive Write Clarification (07:32 PST)
+
+**Who did what:** David clarified intent. DavidBot redesigned the write gate and updated README and HISTORY. No Claude Code involvement.
+
+### Clarification
+The previous design (Round 2) still wrote an idle heartbeat row to `metrics` every 60s regardless of activity. David's intent: during 8+ hours of overnight inactivity, produce zero rows — no CPU cost from writing, no disk cost from storing zeros.
+
+### Design Change: Strictly Activity-Gated Writes
+
+**Old behaviour:** Write to `metrics` if activity detected OR if last write was ≥60s (idle heartbeat).
+**New behaviour:** Write to `metrics` ONLY if any OpenClaw PID CPU% > 1%. Zero rows during idle. Full stop.
+
+**Problem this creates:** Without idle heartbeat rows, the dashboard can't distinguish "nothing happened" from "the collector crashed."
+
+**Solution:** `collector_status` — a single-row table (not an append log). The slow loop (60s) updates `last_seen` in this one row. The fast loop sets `started_at` on startup. The table never grows. Cost: one UPDATE every 60s (trivial).
+
+Dashboard gap interpretation:
+- Gap + `last_seen` falls within gap period → **grey: intentional idle**
+- Gap + `last_seen` predates gap → **amber warning: collector was down**
+
+### Schema Changes
+- Removed `is_idle_heartbeat INTEGER DEFAULT 0` from `metrics` table
+- Added `collector_status` table (single row, enforced by `CHECK (id = 1)`)
+- `metrics` comment updated: "written ONLY when OpenClaw activity detected"
+
+### SSE Changes
+- SSE stream no longer emits events during idle (connection stays open, no data frames)
+- Added `ping:` keep-alive frame every 30s to prevent proxy timeouts
+- `[Live ●]` stays green during idle; goes red only on connection loss
+
+### Activity Threshold
+- 1% CPU as the write trigger (configurable in `config.py`)
+- Rationale: low enough to catch brief heartbeat spikes; high enough to skip true background noise
+
+### Status
+- [x] Round 2 design complete
+- [x] Write gate refined (this entry)
+- [ ] **David reviews** ← current step
+- [ ] Implementation begins
+
+---
+
 *Future entries appended below as the project progresses.*
