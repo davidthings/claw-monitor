@@ -141,6 +141,38 @@ Fix plan:
 **Step 4 — Implement fixes**
 Only after user approval: implement the fixes, re-run the affected tests, confirm they pass, commit.
 
+### 0.5 Iterative Implementation Workflow
+
+Tests are implemented and run incrementally — one test file (or small logical group) at a time. This keeps feedback loops short and makes failures easy to isolate.
+
+**The loop for each group:**
+
+```
+1. Implement the test(s) for this group
+2. Run only those tests:  pytest tests/test_<module>.py -v  (or vitest run tests/<file>.test.ts)
+3. If tests FAIL:
+   a. Determine whether it's a test bug or a code bug
+   b. Fix the test if the test is wrong — no user approval needed for test-only fixes
+   c. If it's a code bug: report to user, get approval, fix the code, re-run
+4. If tests PASS: commit, move to the next group
+5. Report progress to the user at the end of each group
+```
+
+**Group order (recommended):**
+1. `test_db.py` — foundation; everything else depends on DB helpers
+2. `test_pid_tracker.py` — core attribution logic
+3. `test_net_tracker.py` — small, self-contained
+4. `test_gpu_tracker.py` — all mocked, fast
+5. `test_disk_tracker.py` — filesystem tests
+6. `test_collector.py` — CpuTracker, sync_processes, write-gate, overhead, isolation
+7. Next.js: `middleware.test.ts` + `cost.test.ts` — pure functions, no DB
+8. Next.js: `tags.test.ts` — covers resolveTs() in full
+9. Next.js: remaining API routes (tokens, metrics, disk, summary, registry, stream)
+10. Integration: `test_collector_live.py` + `test_api_live.py`
+11. Integration: `test_e2e_scripts.py` + `test_sse_live.py` + `test_backdate.py`
+
+**Never skip the run step.** A test that isn't run isn't a test.
+
 ---
 
 ## 1. Unit Tests — Python Collector (`claw-collector/`)

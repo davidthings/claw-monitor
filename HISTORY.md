@@ -543,4 +543,71 @@ Port `7432` is hardcoded throughout README.md, INSTRUCTIONS.md, and possibly oth
 
 ---
 
+## 2026-03-06 — Test Plan Round 3: Gap Fixes + Running Tests Section (10:07 PST)
+
+**Who did what:** DavidBot reviewed TEST_PLAN.md in full and identified gaps. David confirmed and added a requirement. DavidBot authored task brief and spawned claw-monitor-builder.
+
+### Gaps Identified by DavidBot
+
+1. **No monitoring overhead tests** — the collector's own CPU/RAM footprint is never measured. Core to the project's mission; must be added.
+2. **No non-OpenClaw isolation tests** — nothing verifies that processes outside the gateway tree produce zero rows and don't open the write-gate.
+3. **`sample_interval_s` correctness untested** — the column exists but the elapsed-time math is never verified.
+4. **Idle→active→idle transitions untested** — write-gate tests only cover steady states.
+5. **`metrics_daily` day-boundary logic untested** — rollup timing at midnight not covered.
+6. **Missing `DISK_DIRS` at slow-loop level untested** — only the function-level is tested, not the loop's handling of non-existent configured dirs.
+
+### New Requirement: "Running the Tests" Section
+
+Add a section at the **top** of TEST_PLAN.md (after the intro, before section 1) covering:
+- How to run all tests (unit, integration, full suite)
+- How to interpret results (pass/fail/skip, coverage report, expected flakes)
+- How to fix failures: a structured workflow —
+  1. Run tests, get failure list
+  2. Present failures to user and ask which to fix
+  3. Generate a fix plan for approved failures
+  4. Fix bugs only when user approves the plan
+
+### Participants
+- **DavidBot** — orchestrator; HISTORY author
+- **claw-monitor-builder** — subagent directing Claude Code
+- **Claude Code** — edits TEST_PLAN.md
+
+### Output
+Updated `~/work/claw-monitor/TEST_PLAN.md`, committed and pushed.
+
+---
+
+## 2026-03-06 — Test Implementation Begins (10:25 PST)
+
+**Who did what:** David approved implementation. DavidBot added §0.5 iterative workflow to TEST_PLAN.md and spawned claw-monitor-builder to direct Claude Code through the full implementation.
+
+### Approach
+Tests implemented one file/group at a time. For each group: implement → run → fix test if wrong → report code bugs to user for approval → fix code → commit → next group. David wants regular progress updates throughout.
+
+### Implementation Order
+1. `test_db.py` (foundation)
+2. `test_pid_tracker.py`
+3. `test_net_tracker.py`
+4. `test_gpu_tracker.py`
+5. `test_disk_tracker.py`
+6. `test_collector.py` (CpuTracker, sync_processes, write-gate, overhead, isolation)
+7. Next.js: `middleware.test.ts` + `cost.test.ts`
+8. Next.js: `tags.test.ts`
+9. Next.js: remaining API routes
+10. Integration tests
+
+### Status
+- [ ] test_db.py
+- [ ] test_pid_tracker.py
+- [ ] test_net_tracker.py
+- [ ] test_gpu_tracker.py
+- [ ] test_disk_tracker.py
+- [ ] test_collector.py
+- [ ] middleware + cost (Next.js)
+- [ ] tags (Next.js)
+- [ ] remaining API routes (Next.js)
+- [ ] Integration tests
+
+---
+
 *Future entries appended below as the project progresses.*
