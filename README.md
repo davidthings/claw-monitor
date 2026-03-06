@@ -1,12 +1,24 @@
 # claw-monitor
 
-> **Status: PLANNING PHASE — No code written yet. Awaiting David's review before implementation.**
+> **Status: Live** — collector + web dashboard running, systemd-managed.
+
+---
+
+## Roles
+
+Three roles are involved in building and operating this project:
+
+| Role | Who | Responsibility |
+|---|---|---|
+| **user** | The human running OpenClaw | Installs, configures, and uses the system; annotates the timeline with tags; reviews data in the dashboard |
+| **clawbot** | The OpenClaw AI assistant | Reports work-type tags and token usage to claw-monitor; provides context that the OS cannot infer |
+| **builder** | The AI coding agent (e.g. Claude Code), directed by clawbot | Implements claw-monitor; follows the design spec; commits and deploys |
 
 ---
 
 ## Motivation
 
-David runs OpenClaw on a Linux server (RTX 3090, 64 GB RAM). The goal of this tool is to answer a practical question:
+The goal of this tool is to answer a practical question for anyone running OpenClaw on dedicated hardware:
 
 > **How big does the machine need to be — CPU speed, RAM, disk — to support people's use of OpenClaw?**
 
@@ -16,19 +28,15 @@ Secondary goal: understanding the *composition* of resource use — what fractio
 
 ---
 
-## Agent Collaboration
+## How This Was Built
 
-Three agents built and maintain this project:
+claw-monitor was designed and built collaboratively using the three roles above:
 
-| Agent | Role | Scope |
-|---|---|---|
-| **DavidBot** (OpenClaw main session) | Orchestrator & integration owner | Receives David's requirements; writes/updates design docs; incorporates feedback; owns the OpenClaw-side integration (tagging calls, token reporting); directs the builder subagent |
-| **claw-monitor-builder** (OpenClaw subagent) | Project manager | Spawned by DavidBot; manages Claude Code; translates design into implementation tasks; reviews Claude Code output; maintains README.md and HISTORY.md during build phase |
-| **Claude Code** | Implementation agent | Runs in `~/work/claw-monitor/`; writes all application code; follows design spec; PLANNING MODE ONLY until David approves |
+- **clawbot** drove requirements, authored the design documents, incorporated feedback, and owns the OpenClaw-side integration
+- **builder** (a Claude Code instance, directed by a clawbot subagent) reviewed the architecture, implemented all code, and deployed the services
+- **user** defined the goals, reviewed the design, and approved implementation
 
-**Decision authority:** DavidBot writes the design docs and has final say on what goes in. Claude Code can surface implementation concerns (and already resolved several architectural bugs during planning). claw-monitor-builder routes those concerns back to DavidBot and David.
-
-**Attribution convention in HISTORY.md:** Each significant decision notes which agent drove it, at a high level (e.g., "Claude Code identified PID reuse bug; resolved by DavidBot in schema").
+Detailed attribution for each decision is in `HISTORY.md`.
 
 ---
 
@@ -37,7 +45,7 @@ Three agents built and maintain this project:
 1. **Right-size data** for infrastructure decisions: CPU, RAM, disk, network requirements for OpenClaw under real usage
 2. **Attribution**: know what fraction of machine resources is OpenClaw (gateway, browser, agents) vs. local LLM (Qwen) vs. unrelated system activity
 3. **Token visibility**: track LLM token consumption per tool type for cost analysis
-4. **Tagging**: let OpenClaw and David annotate the timeline with work-type context (so raw numbers can be correlated with what was happening)
+4. **Tagging**: let clawbot and the user annotate the timeline with work-type context (so raw numbers can be correlated with what was happening)
 5. **Low overhead**: collector doesn't noticeably compete with OpenClaw or Qwen
 6. **Persistent dashboard**: available 24/7 on a fixed Tailscale-reachable port from any device
 
@@ -313,7 +321,7 @@ Tags annotate the timeline with human-readable context. They appear as colored o
 # Fire-and-forget (background, silent failure)
 curl -sf -X POST http://localhost:7432/api/tags \
   -H 'Content-Type: application/json' \
-  -d '{"category":"conversation","text":"Signal message from David about claw-monitor design","source":"openclaw"}' &
+  -d '{"category":"conversation","text":"Answering user question about system design","source":"clawbot"}' &
 ```
 
 **Helper script:** `scripts/tag.sh <category> <text>` — validates category, constructs JSON, fires curl in background, exits 0 always.
@@ -324,16 +332,15 @@ Tagging requires OpenClaw to remember to call the API at the right moments. Here
 
 | Trigger | Reliability | Method |
 |---|---|---|
-| Session start — set initial tag | **High** | Added to AGENTS.md startup routine; happens before any work |
-| Spawning a subagent | **High** | Already explicit in my workflow; tag before/after spawn |
-| Starting a Qwen session | **High** | Explicit script invocation; easy to add tag call |
-| Work type changes mid-conversation | **Medium** | May forget; tag extends until next tag so data is imprecise but not missing |
-| Session end / going idle | **Low** | No reliable signal; idle heartbeat from collector is a proxy |
+| Session start — set initial tag | **High** | Added to clawbot startup routine; happens before any work |
+| Spawning a subagent | **High** | Explicit in workflow; tag before/after spawn |
+| Starting a local LLM session | **High** | Explicit script invocation; easy to add tag call |
+| Work type changes mid-conversation | **Medium** | May be missed; tag extends until next tag so data is imprecise but not missing |
+| Session end / going idle | **Low** | No reliable signal; collector liveness check is the proxy |
 
-**Mitigation:** Tags are best-effort. The collector always writes idle heartbeats at 60s when no activity is detected, so the timeline never has unexplained gaps. A missed mid-session tag just means the previous tag extends a bit longer than it should — minor accuracy issue, not a data integrity problem.
+**Mitigation:** Tags are best-effort. A missed mid-session tag just means the previous tag extends a bit longer than it should — minor accuracy issue, not a data integrity problem.
 
-**What gets added to AGENTS.md:**
-A two-line reminder at the top of the "Every Session" section:
+**Clawbot startup reminder:** A two-line note in clawbot's operating instructions:
 ```
 - Tag your session type at the start: scripts/tag.sh conversation "brief description"
 - Tag before spawning agents: scripts/tag.sh agent "agent name and task"
@@ -372,7 +379,7 @@ POST /api/tags
 {
   "category":   "conversation",          // required; must be in allowed set
   "text":       "Signal message: ...",   // required; human-readable description
-  "source":     "openclaw",              // required: "openclaw" | "david" | "system" | "auto"
+  "source":     "clawbot",               // required: "clawbot" | "user" | "system" | "auto"
   "session_id": "agent:main:signal:..."  // optional; correlates to an OpenClaw session
   "ts":         <see below>              // optional; defaults to now
 }
@@ -393,12 +400,12 @@ Backdating is useful when you remember what you were doing a few minutes ago but
 
 **`tag.sh` backdating:**
 ```bash
-tag.sh conversation "was reading the README" david "" -10m
-tag.sh coding "debugging the collector" david "" "30 minutes ago"
-tag.sh research "reading arxiv paper" david "" "2026-03-06T08:03:00"
+tag.sh conversation "was reading the README" user "" -10m
+tag.sh coding "debugging the collector" user "" "30 minutes ago"
+tag.sh research "reading arxiv paper" user "" "2026-03-06T08:03:00"
 ```
 
-Tags can also be created manually from the dashboard UI (David can annotate the timeline directly).
+Tags can also be created manually from the dashboard UI (the user can annotate the timeline directly).
 
 ### Database
 
@@ -408,7 +415,7 @@ CREATE TABLE tags (
   ts         INTEGER NOT NULL,
   category   TEXT NOT NULL,   -- 'conversation'|'coding'|'research'|'agent'|'heartbeat'|'qwen'|'idle'|'other'
   text       TEXT NOT NULL,
-  source     TEXT NOT NULL,   -- 'openclaw'|'david'|'system'|'auto'
+  source     TEXT NOT NULL,   -- 'clawbot'|'user'|'system'|'auto'
   session_id TEXT
 );
 CREATE INDEX idx_tags_ts ON tags(ts);
@@ -540,9 +547,9 @@ Submit a work-type tag.
 ```json
 {
   "category": "conversation",
-  "text": "Signal: David asking about claw-monitor design",
-  "source": "openclaw",
-  "session_id": "agent:main:signal:direct:+15303386428"
+  "text": "User asked about claw-monitor design",
+  "source": "clawbot",
+  "session_id": "agent:main:signal:direct"
 }
 ```
 
@@ -654,7 +661,7 @@ Query tag history.
 ```json
 {
   "tags": [
-    { "id": 7, "ts": 1709712000, "category": "conversation", "text": "Signal: David about claw-monitor", "source": "openclaw", "session_id": "agent:main:..." }
+    { "id": 7, "ts": 1709712000, "category": "conversation", "text": "User question about claw-monitor", "source": "clawbot", "session_id": "agent:main:..." }
   ]
 }
 ```
@@ -709,8 +716,8 @@ Aggregate token usage.
 │  └────────────────────────────────────────────────────────┘  │
 ├──────────────────────────────────────────────────────────────┤
 │  Recent Tags                                                  │
-│  06:33 [conversation] Signal: David claw-monitor design      │
-│  07:14 [conversation] Signal: David design review round 2    │
+│  06:33 [conversation] User session: system design            │
+│  07:14 [conversation] User session: design review round 2    │
 │                                             [→ Full timeline]│
 ├──────────────────────────────────────────────────────────────┤
 │  Today's Token Usage   1.2M in / 3.4M out  Est. $4.20       │
@@ -754,7 +761,7 @@ Live process table with alive/dead status. Group breakdown donut. Description to
 
 ### `/tags` — Tag Log
 
-Full tag history with filter by category and source. Timeline view showing tag periods as colored spans. David can add manual tags from this page.
+Full tag history with filter by category and source. Timeline view showing tag periods as colored spans. The user can add manual tags from this page.
 
 ---
 
@@ -915,7 +922,7 @@ systemctl --user status claw-*            # both at once
 - **CPU symptom:** Stat card showed ~27,892% — 30 min of rows × all groups summed together
 - **Memory symptom:** Stat card showed ~1,130 GB — same accumulation bug, then divided by 1024 to "convert to GB"
 
-**Fix (frontend only — collector data was correct):**
+**Fix (frontend only — collector data was always correct):**
 - Find `latestTs = max(row.ts)` across all returned rows
 - Filter to only `rows where ts === latestTs` for stat card values
 - CPU display changed to **"X.XX cores"** (sum of cpu_pct / 100), which is more intuitive for sizing questions than a % that can exceed 100% on multi-threaded workloads
