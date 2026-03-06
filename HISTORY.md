@@ -624,4 +624,25 @@ Integration tests were largely bypassing the actual HTTP API and manipulating SQ
 
 ---
 
+## 2026-03-06 — Overview Page Redesign Implementation (12:02 PST)
+
+**Who did what:** David approved spec and said go. DavidBot spawning claw-monitor-builder to direct Claude Code.
+
+### Spec reference
+`docs/UI_SPEC.md` — Overview page. Key changes:
+- Add Tokens stat card (current tok/min, last 60s)
+- Replace separate CPU/GPU/Network mini-charts with a single combined chart
+- Left Y-axis: CPU (cores) + Memory (GB). Right Y-axis: GPU (%) + Network (KB/s) + Tokens (tok/min)
+- Token line: smoothed (Recharts monotone + rolling average)
+- Tag markers on time axis: colour-coded by category, hover popup, 8px clustering
+- Time range picker (same as Metrics page), persisted in localStorage
+- Hover crosshair tooltip showing all resource values
+
+### Participants
+- **DavidBot** — orchestrator; HISTORY author
+- **claw-monitor-builder** — subagent directing Claude Code
+- **Claude Code** — implements web/src/app/page.tsx and supporting components
+
+---
+
 *Future entries appended below as the project progresses.*
