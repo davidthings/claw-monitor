@@ -4,7 +4,7 @@ import { getDb } from "@/lib/db";
 const VALID_CATEGORIES = new Set([
   "conversation", "coding", "research", "agent", "heartbeat", "qwen", "idle", "other",
 ]);
-const VALID_SOURCES = new Set(["openclaw", "david", "system", "auto"]);
+const VALID_SOURCES = new Set(["clawbot", "user", "system", "auto", "openclaw", "david"]); // legacy values kept for backcompat
 
 /**
  * Parse an optional `ts` field from the request body.
@@ -71,11 +71,12 @@ export async function POST(request: NextRequest) {
   if (ts === null) {
     return NextResponse.json({ error: `Cannot parse ts: "${rawTs}". Use unix timestamp, ISO-8601, "-10m", or "10 minutes ago".` }, { status: 400 });
   }
+  const recordedAt = Math.floor(Date.now() / 1000); // always wall-clock now
 
   const db = getDb();
   const result = db.prepare(
-    "INSERT INTO tags (ts, category, text, source, session_id) VALUES (?, ?, ?, ?, ?)"
-  ).run(ts, category, text, source, session_id || null);
+    "INSERT INTO tags (ts, recorded_at, category, text, source, session_id) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(ts, recordedAt, category, text, source, session_id || null);
 
   return NextResponse.json({ ok: true, id: result.lastInsertRowid }, { status: 201 });
 }
@@ -88,7 +89,7 @@ export async function GET(request: NextRequest) {
   const source = params.get("source");
 
   const db = getDb();
-  let sql = "SELECT id, ts, category, text, source, session_id FROM tags WHERE 1=1";
+  let sql = "SELECT id, ts, recorded_at, category, text, source, session_id FROM tags WHERE 1=1";
   const args: (string | number)[] = [];
 
   if (from) {

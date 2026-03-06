@@ -396,7 +396,9 @@ POST /api/tags
 | `"2026-03-06T08:03:00"` | ISO-8601 absolute |
 | Any `Date.parse()`-able string | Parsed as absolute time |
 
-Backdating is useful when you remember what you were doing a few minutes ago but didn't tag it at the time. The tag appears at the correct point on the timeline chart.
+When `ts` is provided, **the tag is stored and displayed at the specified effective time** — it appears at that point on the timeline chart, not when the POST was received. The wall-clock submission time is stored separately as `recorded_at`. Tags where `|recorded_at − ts| > 5s` are considered backdated.
+
+**UI indicator:** Backdated tags show a small superscript `↩` next to the timestamp in the tag log. Hovering reveals the original submission time. The tag appears at its effective time on chart overlays with no additional annotation — the `↩` is only in the log list.
 
 **`tag.sh` backdating:**
 ```bash
@@ -411,12 +413,13 @@ Tags can also be created manually from the dashboard UI (the user can annotate t
 
 ```sql
 CREATE TABLE tags (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts         INTEGER NOT NULL,
-  category   TEXT NOT NULL,   -- 'conversation'|'coding'|'research'|'agent'|'heartbeat'|'qwen'|'idle'|'other'
-  text       TEXT NOT NULL,
-  source     TEXT NOT NULL,   -- 'clawbot'|'user'|'system'|'auto'
-  session_id TEXT
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          INTEGER NOT NULL,   -- effective timestamp (may be backdated)
+  recorded_at INTEGER NOT NULL,   -- wall-clock submission time; ts != recorded_at means backdated
+  category    TEXT NOT NULL,      -- 'conversation'|'coding'|'research'|'agent'|'heartbeat'|'qwen'|'idle'|'other'
+  text        TEXT NOT NULL,
+  source      TEXT NOT NULL,      -- 'clawbot'|'user'|'system'|'auto'
+  session_id  TEXT
 );
 CREATE INDEX idx_tags_ts ON tags(ts);
 ```

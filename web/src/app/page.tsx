@@ -23,6 +23,7 @@ interface MetricRow {
 interface Tag {
   id: number;
   ts: number;
+  recorded_at?: number;
   category: string;
   text: string;
   source: string;

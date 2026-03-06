@@ -437,4 +437,31 @@ All four formats smoke-tested and confirmed working.
 
 ---
 
+## 2026-03-06 — Tag `recorded_at` field + backdated indicator (08:22 PST)
+
+**Who did what:** David asked for confirmation and the indicator feature. DavidBot confirmed behaviour, implemented `recorded_at`, and added the UI indicator. No Claude Code involvement.
+
+### Confirmation
+The effective `ts` stored in the DB **is** the adjusted/backdated time — not the wall-clock submission time. Verified with live DB query: a tag posted with `ts="-15m"` is stored at 08:28, while the service received it at 08:43.
+
+### Changes
+
+**Schema:** Added `recorded_at INTEGER NOT NULL` to `tags` table.
+- `ts` = effective timestamp (the one shown on charts; may be backdated)
+- `recorded_at` = wall-clock time the POST was received (always now)
+- `ts != recorded_at` (by >5s) → tag is considered backdated
+- Existing rows backfilled: `recorded_at = ts` (original submission time unknown)
+
+**API (`/api/tags`):**
+- POST: always sets `recorded_at = Date.now()` server-side; `ts` = `resolveTs(rawTs)`
+- GET: now returns `recorded_at` in every tag row
+- Source validation updated to accept `clawbot`/`user` (new names) plus `openclaw`/`david` (legacy backcompat)
+
+**UI (`TagLog.tsx`):**
+- Backdated tags show a small superscript `↩` next to the timestamp
+- Tooltip on hover shows the original submission time (`recorded_at`)
+- Chart overlays (`TagOverlay.tsx`) unchanged — tags appear at `ts` with no extra annotation there
+
+---
+
 *Future entries appended below as the project progresses.*

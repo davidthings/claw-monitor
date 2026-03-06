@@ -79,11 +79,12 @@ CREATE INDEX IF NOT EXISTS idx_token_events_tool ON token_events(tool);
 
 -- Work-type annotations
 CREATE TABLE IF NOT EXISTS tags (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts         INTEGER NOT NULL,
-  category   TEXT NOT NULL,
-  text       TEXT NOT NULL,
-  source     TEXT NOT NULL,
-  session_id TEXT
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          INTEGER NOT NULL,      -- effective timestamp (may be backdated)
+  recorded_at INTEGER NOT NULL,      -- wall-clock time tag was actually submitted; ts != recorded_at means backdated
+  category    TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  session_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tags_ts ON tags(ts);
