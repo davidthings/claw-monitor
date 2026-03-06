@@ -412,4 +412,29 @@ The collector was reading VmRSS correctly — the data in the DB was always righ
 
 ---
 
+## 2026-03-06 — Tag Backdating (08:16 PST)
+
+**Who did what:** David requested the feature. DavidBot implemented it directly (API route + script, no Claude Code involvement).
+
+### Feature: `ts` field on POST /api/tags
+
+Tags can now be backdated via an optional `ts` field. Formats accepted:
+- Omitted → now
+- Unix timestamp (number)
+- `"-10m"` / `"-30s"` / `"-2h"` — relative delta
+- `"10 minutes ago"` — natural language relative
+- `"2026-03-06T08:03:00"` — ISO-8601 absolute
+
+The `resolveTs()` helper in `route.ts` handles all parsing. Returns HTTP 400 with a clear error message if the format is unrecognisable.
+
+`tag.sh` updated: optional 5th argument is the `ts` value (passed as JSON string to the API).
+
+All four formats smoke-tested and confirmed working.
+
+### Files changed
+- `web/src/app/api/tags/route.ts` — added `resolveTs()`, parse `ts` from body
+- `scripts/tag.sh` — added optional 5th `[ts]` arg, uses `python3 -c json.dumps` for safe JSON encoding of text and ts values
+
+---
+
 *Future entries appended below as the project progresses.*

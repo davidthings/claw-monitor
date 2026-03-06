@@ -374,7 +374,28 @@ POST /api/tags
   "text":       "Signal message: ...",   // required; human-readable description
   "source":     "openclaw",              // required: "openclaw" | "david" | "system" | "auto"
   "session_id": "agent:main:signal:..."  // optional; correlates to an OpenClaw session
+  "ts":         <see below>              // optional; defaults to now
 }
+```
+
+**`ts` field — backdating support:**
+
+| Value | Interpretation |
+|---|---|
+| Omitted / null | Now (server time at receipt) |
+| Number | Unix timestamp (seconds) |
+| `"-10m"` / `"-30s"` / `"-2h"` | Relative delta: N minutes/seconds/hours ago |
+| `"10 minutes ago"` | Natural language relative (minutes, seconds, hours) |
+| `"2026-03-06T08:03:00"` | ISO-8601 absolute |
+| Any `Date.parse()`-able string | Parsed as absolute time |
+
+Backdating is useful when you remember what you were doing a few minutes ago but didn't tag it at the time. The tag appears at the correct point on the timeline chart.
+
+**`tag.sh` backdating:**
+```bash
+tag.sh conversation "was reading the README" david "" -10m
+tag.sh coding "debugging the collector" david "" "30 minutes ago"
+tag.sh research "reading arxiv paper" david "" "2026-03-06T08:03:00"
 ```
 
 Tags can also be created manually from the dashboard UI (David can annotate the timeline directly).
