@@ -276,9 +276,10 @@ class TestBackdateLogic:
         assert ts == t_early
 
     def test_4_4_no_matching_calls_backdate_to_now(self):
-        """If no calls of the winning category, backdate to approximately now."""
-        calls = [{"name": "tts", "ts": make_ts(5)}]
-        # conversation won via has_messages fallback, no explicit conversation tools
+        """If no calls of the winning category, backdate to approximately now.
+        Scenario: classify returned 'conversation' via has_messages fallback,
+        no tool calls present at all."""
+        calls = []  # empty — conversation won via has_messages, not tool calls
         before = datetime.now(timezone.utc)
         ts = at.get_backdate_ts(calls, "conversation", last_tag_ts=None)
         after = datetime.now(timezone.utc)
