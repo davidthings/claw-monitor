@@ -236,3 +236,43 @@ Add these two lines to your operating instructions (e.g. AGENTS.md):
 ```
 
 Everything else is automatic.
+
+---
+
+## Automatic Tagging (Auto-Tagger)
+
+In addition to manual tagging above, an automatic tagger runs every 10 minutes via system cron. It reads OpenClaw session JSONL files directly, infers work type from tool call patterns, and fires backdated tags to claw-monitor without any LLM involvement.
+
+**You do not need to do anything for this to work.** It runs independently of the agent.
+
+### What it does
+- Looks at the last 15 minutes of tool calls in the active Signal session
+- Classifies work type by heuristic priority: `agent > coding > research > conversation > other > idle`
+- Backdates the tag to when the detected activity began
+- Suppresses duplicate tags if the category hasn't changed and the last tag is recent
+
+### Installation (one-time)
+
+```bash
+# Install the system cron entry
+crontab -e
+```
+
+Add this line:
+```
+*/10 * * * * /home/david/work/claw-monitor/scripts/auto_tagger.py >> /home/david/.openclaw/logs/auto-tagger.log 2>&1
+```
+
+Make the script executable:
+```bash
+chmod +x ~/work/claw-monitor/scripts/auto_tagger.py
+```
+
+### Manual run (test / debug)
+```bash
+~/work/claw-monitor/scripts/auto_tagger.py
+tail ~/.openclaw/logs/auto-tagger.log
+```
+
+### Design and test plan
+See `docs/AUTO_TAGGER.md` for full design, heuristic rules, and test specification.
