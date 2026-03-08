@@ -94,10 +94,11 @@ function pivotMetrics(metrics: MetricRow[]): ChartPoint[] {
     if (row.grp === "gpu") {
       entry.gpu = row.gpu_util_pct ?? undefined;
     } else if (row.grp === "net") {
-      entry.net = (row.net_in_kb || 0) + (row.net_out_kb || 0);
+      const interval = row.sample_interval_s ?? 1;
+      entry.net = ((row.net_in_kb || 0) + (row.net_out_kb || 0)) / interval;
     } else {
       entry.cpu += (row.cpu_pct || 0) / 100;
-      entry.mem = Math.max(entry.mem, (row.mem_rss_mb || 0) / 1024);
+      entry.mem += (row.mem_rss_mb || 0) / 1024;
     }
   }
 
