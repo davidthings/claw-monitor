@@ -119,10 +119,12 @@ def get_recent_tool_calls(jsonl_path: str, window_minutes: int = WINDOW_MINUTES)
                 content = record.get("message", {}).get("content", [])
                 for block in content:
                     if block.get("type") == "toolCall":
+                        # OpenClaw uses "arguments" field (not "input")
+                        args = block.get("arguments") or block.get("input") or {}
                         calls.append({
                             "name": block.get("name", "unknown"),
                             "ts": ts,
-                            "input": block.get("input", {}),
+                            "input": args,
                         })
 
     except OSError as e:
@@ -365,7 +367,7 @@ HOME = str(Path.home())
 
 HEARTBEAT_TOOLS = {"exec", "memory_search", "memory_get", "web_fetch", "session_status", "cron"}
 HEARTBEAT_MAX_CALLS = 8
-FILE_TOOLS = {"Read", "Write", "Edit"}
+FILE_TOOLS = {"Read", "Write", "Edit", "read", "write", "edit"}
 
 
 def _path_to_project(path: str) -> str | None:
