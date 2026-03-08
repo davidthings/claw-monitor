@@ -790,6 +790,21 @@ TypeScript clean, build passed, claw-web restarted.
 
 ---
 
+## 2026-03-08 — Chart domain fix (ongoing)
+
+**Who did what:** David reported; DavidBot investigated and fixed (in progress).
+
+### Problem
+The Combined Chart's x-axis was not aligned to the current time. Three iterations:
+
+**Attempt 1 (b49cfcd):** Changed `domain={["auto","auto"]}` → `domain={[(dataMin) => dataMin, () => Math.floor(Date.now() / 1000)]}`. Fixed the right edge but left edge was `dataMin` (wherever data actually started), not `now - rangeSeconds`. Also: `Date.now()` inside the domain function is called on every render, causing the domain to shift subtly each render cycle, triggering Recharts animation — data appeared to slide left.
+
+**Attempt 2 (8035665):** Changed left bound to `() => Math.floor(Date.now() / 1000) - rangeSeconds`. Correct intent, but same problem: both bounds are functions calling `Date.now()` on every render. Made the animation artifact worse — data started on the right and animated left.
+
+**Correct fix (planned, not yet committed):** Pass `from` and `to` as stable state values from `page.tsx` down to `CombinedChart`. Set them once per `fetchData` call, atomically with the data. Use static numbers as domain `[from, to]` — Recharts only triggers animation when values actually change. Also: disable `isAnimationActive` on all Lines/Areas — live monitoring charts should never animate.
+
+---
+
 ## 2026-03-08 — Chart x-axis right-edge fix
 
 **Who did what:** David reported; DavidBot fixed.
