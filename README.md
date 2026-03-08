@@ -937,6 +937,16 @@ systemctl --user status claw-*            # both at once
 
 ---
 
+## Known Issues / Work To Do Next
+
+### Time axis labels not displaying correctly
+The X-axis tick labels on the Combined Chart don't appear to be working quite right. Needs investigation — possibly a formatting, scale, or Recharts tick interval issue.
+
+### Data volume design problem — rethink before adding more charts
+Removing the `LIMIT 10000` from the raw metrics query was a stopgap fix. Sending 28,800+ rows to a browser chart for a 2h view is a design smell. Something is wrong architecturally if we need that many records for a simple line chart. Need to think about the right approach — options might include server-side downsampling, a smarter resolution tier below "hourly", or a dynamic sample stride based on the requested time window. Do not add more charts or extend ranges without addressing this first.
+
+---
+
 ## Not In Scope (v1)
 
 - Per-PID network I/O (requires libpcap or eBPF — v2 candidate)

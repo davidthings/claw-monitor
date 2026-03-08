@@ -884,3 +884,22 @@ Possibly also: verify no additional domain/data timestamp misalignment introduce
 - **claw-monitor-builder** — subagent directing Claude Code
 - **Claude Code** — implements fix, rebuilds, redeploys
 
+
+---
+
+## 2026-03-08 — Chart data scope bug fixed (11:06 PST)
+
+**Who did what:** David reported via screenshot. DavidBot described symptom to Claude Code. Claude Code diagnosed and fixed.
+
+### Bug
+2h time range showed only ~40 minutes of data on the left portion empty, even though data existed in the DB for the full period. Axis was correct; data was truncated.
+
+### Root cause
+Hard `LIMIT 10000` in the raw metrics SQL query (`web/src/app/api/metrics/route.ts`). With ~4 rows/second from the collector (multiple process groups + gpu + net rows per timestamp), a 2h window needs ~28,800 rows. The LIMIT was silently truncating to the most recent ~40 minutes.
+
+### Fix
+Removed `LIMIT 10000` and the accompanying comment. The `WHERE ts >= ? AND ts <= ?` clause already bounds the result set adequately for sub-6h windows. Committed `ee8320d`, pushed.
+
+### Follow-on design notes (added to README)
+- Time axis tick labels still not displaying correctly — needs investigation
+- Removing the LIMIT is a stopgap. Sending 28k+ rows to a browser chart is a design smell. Proper fix: server-side downsampling or dynamic resolution stride based on window size. Do not extend ranges or add more charts before addressing this.
