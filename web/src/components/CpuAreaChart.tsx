@@ -7,6 +7,8 @@ import {
 interface Props {
   data: Record<string, number>[];
   groups?: string[];
+  unit?: string;
+  decimals?: number;
 }
 
 const GROUP_COLORS: Record<string, string> = {
@@ -19,15 +21,17 @@ function formatTime(ts: number) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function CpuAreaChart({ data, groups = ["openclaw-core", "openclaw-browser", "openclaw-agent"] }: Props) {
+export default function CpuAreaChart({ data, groups = ["openclaw-core", "openclaw-browser", "openclaw-agent"], unit = "%", decimals = 1 }: Props) {
+  const fmt = (v: number) => v.toFixed(decimals);
   return (
     <ResponsiveContainer width="100%" height={250}>
       <AreaChart data={data}>
         <CartesianGrid strokeDasharray="3 3" stroke="#333" />
         <XAxis dataKey="ts" type="number" scale="time" domain={["auto", "auto"]} tickFormatter={formatTime} stroke="#888" />
-        <YAxis unit="%" stroke="#888" />
+        <YAxis unit={` ${unit}`} tickFormatter={fmt} stroke="#888" />
         <Tooltip
           labelFormatter={(v) => formatTime(v as number)}
+          formatter={(v: number) => [`${fmt(v)} ${unit}`]}
           contentStyle={{ background: "#1a1a2e", border: "1px solid #333" }}
         />
         <Legend />

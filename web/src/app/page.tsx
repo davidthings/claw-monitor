@@ -15,6 +15,7 @@ interface MetricRow {
   gpu_util_pct?: number;
   gpu_vram_used_mb?: number;
   gpu_power_w?: number;
+  sample_interval_s?: number;
 }
 
 interface Tag {
@@ -225,12 +226,25 @@ export default function HomePage() {
 
   let latestGpu = 0;
   let latestVram = 0;
+  let latestNetInKbps = 0;
+  let latestNetOutKbps = 0;
   for (const row of metrics) {
     if (row.ts === latestTs && row.grp === "gpu") {
       if (row.gpu_util_pct != null) latestGpu = row.gpu_util_pct;
       if (row.gpu_vram_used_mb != null) latestVram = row.gpu_vram_used_mb;
     }
+    if (row.ts === latestTs && row.grp === "net") {
+      const interval = row.sample_interval_s ?? 1;
+      if (row.net_in_kb != null) latestNetInKbps = row.net_in_kb / interval;
+      if (row.net_out_kb != null) latestNetOutKbps = row.net_out_kb / interval;
+    }
   }
+
+  const totalNetKbps = latestNetInKbps + latestNetOutKbps;
+  const netDisplay =
+    totalNetKbps >= 1024
+      ? `${(totalNetKbps / 1024).toFixed(1)} MB/s`
+      : `${totalNetKbps.toFixed(0)} kB/s`;
 
   const totalDiskMb = disk.reduce((sum, d) => {
     if (d.dir_key === "openclaw-total") return d.size_bytes / (1024 * 1024);
@@ -270,6 +284,14 @@ export default function HomePage() {
           <h2>Disk</h2>
           <div className="stat-value">{totalDiskMb.toFixed(0)}MB</div>
           <div className="stat-label">openclaw total</div>
+        </div>
+        <div className="card">
+          <h2>Network</h2>
+          <div className="stat-value">{netDisplay}</div>
+          <div className="stat-label">
+            ↓ {latestNetInKbps >= 1024 ? `${(latestNetInKbps / 1024).toFixed(1)}M` : `${latestNetInKbps.toFixed(0)}k`}{" "}
+            ↑ {latestNetOutKbps >= 1024 ? `${(latestNetOutKbps / 1024).toFixed(1)}M` : `${latestNetOutKbps.toFixed(0)}k`}
+          </div>
         </div>
         <div className="card">
           <h2>Tokens</h2>

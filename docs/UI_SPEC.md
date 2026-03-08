@@ -13,7 +13,7 @@ The Overview page is the primary view. It answers the question: **what is OpenCl
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  STAT CARDS (top row)                                           │
-│  [CPU]  [MEMORY]  [GPU]  [DISK]  [TOKENS]                       │
+│  [CPU]  [MEMORY]  [GPU]  [DISK]  [NETWORK]  [TOKENS]            │
 ├─────────────────────────────────────────────────────────────────┤
 │  COMBINED RESOURCE CHART (main panel)                           │
 │                                                                 │
@@ -35,6 +35,7 @@ Five cards displayed in a row across the top:
 | Memory | `X.XXGB` | `of YYGb RSS (now)` |
 | GPU | `XX%` | `X.XGB VRAM (now)` |
 | Disk | `XXXMB` | `openclaw total` |
+| Network | `XX kB/s` (auto-upgrades to `MB/s`) | `↓ Xk ↑ Xk` — in/out split |
 | Tokens | `XX tok/min` | `current rate` |
 
 - Values update live via SSE (same mechanism as current)
@@ -150,3 +151,114 @@ The Overview page makes the following API calls on load, then subscribes to SSE 
 ---
 
 *Spec authored: 2026-03-06. No implementation yet.*
+
+---
+
+## Metrics Page (`/metrics`) — Time-Series Explorer
+
+The Metrics page is the detailed time-series view. It answers: **what exactly happened over time, broken down by resource?**
+
+---
+
+### Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Time-Series Explorer          [30m] [1h] [6h] [24h] [7d] [res]│
+├─────────────────────────────────────────────────────────────────┤
+│  CPU by Group        (stacked area, one band per grp)           │
+├─────────────────────────────────────────────────────────────────┤
+│  Memory by Group     (stacked area, one band per grp)           │
+├─────────────────────────────────────────────────────────────────┤
+│  GPU                 (util % + VRAM MB, dual line)              │
+├─────────────────────────────────────────────────────────────────┤
+│  Network             (↓ in / ↑ out, dual line, kB/s)           │
+├─────────────────────────────────────────────────────────────────┤
+│  Disk                (openclaw-total MB over time, line)        │
+├─────────────────────────────────────────────────────────────────┤
+│  Tokens/min          (bucketed rate from token_events)          │
+├─────────────────────────────────────────────────────────────────┤
+│  Tags                (dedicated horizontal timeline panel)      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Panels
+
+#### Existing (no change)
+
+| Panel | Chart type | Data source | Unit |
+|-------|-----------|-------------|------|
+| CPU by Group | Stacked area | `metrics` grp rows, `cpu_pct` | cores (cpu_pct / 100) |
+| Memory by Group | Stacked area | `metrics` grp rows, `mem_rss_mb` | MB |
+| GPU | Dual line (util + VRAM) | `metrics` grp=gpu | % / MB |
+| Network | Dual line (in/out) | `metrics` grp=net, `net_in_kb`/`net_out_kb` | kB/s |
+
+#### New: Disk
+
+- **Chart type:** Single line
+- **Data source:** `disk_snapshots` table, `dir_key = 'openclaw-total'`, `size_bytes`
+- **Unit:** MB (size_bytes / 1024 / 1024)
+- **API:** `GET /api/disk?from=<start>&to=<now>` (filter client-side to `openclaw-total`)
+- **Y-axis:** MB, left axis
+- **Gaps:** disk is sampled on the slow loop (~60s); gaps expected for long ranges — draw as connected line (sparse is fine)
+
+#### New: Tokens/min
+
+- **Chart type:** Line (smoothed, same rolling-average approach as Overview)
+- **Data source:** `token_events` table, bucketed by chart time resolution
+- **Unit:** tokens/min
+- **API:** `GET /api/tokens?from=<start>&to=<now>`
+- **Bucketing:** same logic as Overview's `mergeTokens()` — reuse or extract to a shared util
+- **Y-axis:** tokens/min, left axis
+
+#### New: Tags
+
+- **Chart type:** Dedicated horizontal timeline panel (not overlaid on any chart)
+- **Data source:** `tags` table
+- **API:** `GET /api/tags?from=<start>&to=<now>`
+- **Appearance:**
+  - Panel has a fixed height (e.g. 60–80px)
+  - Each tag is a colored vertical marker on a horizontal time axis
+  - Color-coded by category (same scheme as Overview tag markers)
+  - Tag text shown as a label beside or below the marker when space permits; truncated on overlap
+  - On hover: tooltip with full timestamp, category badge, and tag text
+  - Clustering: tags within 8px are grouped into a count badge (same as Overview)
+- **Position:** Bottom of the page — acts as the "context layer" for everything above
+
+| Category | Colour |
+|----------|--------|
+| `conversation` | sky blue |
+| `coding` | amber |
+| `research` | teal |
+| `agent` | purple |
+| `heartbeat` | grey |
+| `qwen` | lime |
+| `idle` | dark grey |
+| `other` | white/neutral |
+
+---
+
+### Controls
+
+- **Range picker:** 30m / 1h / 6h / 24h / 7d — persisted in `localStorage` (key: `claw-metrics-range`)
+- **Resolution selector:** Auto / Raw / Hourly / Daily — persisted in `localStorage` (key: `claw-metrics-resolution`)
+- All panels share the same time range and update together on range change
+
+---
+
+### Data Queries
+
+| Data | Endpoint | Notes |
+|------|----------|-------|
+| CPU / Memory / GPU / Network | `GET /api/metrics?from=<start>&to=<now>&resolution=<res>` | All grp rows |
+| Disk | `GET /api/disk?from=<start>&to=<now>` | Filter to `openclaw-total` client-side |
+| Tokens | `GET /api/tokens?from=<start>&to=<now>` | Bucket and smooth client-side |
+| Tags | `GET /api/tags?from=<start>&to=<now>` | All categories |
+
+- Refresh every 10s (same as Overview)
+
+---
+
+*Metrics page spec added: 2026-03-07.*

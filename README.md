@@ -744,7 +744,7 @@ Aggregate token usage.
 
 ### `/metrics` — Time-Series Explorer
 
-Full date-range explorer with CPU, memory, GPU, and network charts. Recharts brush selection for zoom. Group filter. Resolution auto or manual. Tag overlays on all charts. Tooltip shows sample_interval_s to indicate data density at any point.
+Full date-range explorer with one panel per resource: CPU by group (stacked area), memory by group (stacked area), GPU (util + VRAM), network (in/out kB/s), disk (openclaw-total MB over time), tokens/min (bucketed from token_events), and a dedicated Tags timeline panel at the bottom. Resolution auto or manual. All panels share the same time range. Tags panel shows colored markers by category with hover tooltips.
 
 ---
 
