@@ -1,6 +1,6 @@
 # claw-monitor Auto-Tagger
 
-*Status: Planned — not yet implemented*
+*Status: Phase 1 implemented. Phase 1 context enrichment planned.*
 *Added: 2026-03-08*
 
 ---
@@ -217,6 +217,94 @@ RETAG_AFTER_MINUTES = 20     # re-tag even if same category if it's been this lo
 | No activity in window | Tags `idle` (or extends existing tag silently if already idle) |
 | Ambiguous category (close call) | Priority rule picks deterministically; accuracy ≈ 80% |
 | Cron not firing | System cron failure; unrelated to OpenClaw; check `crontab -l` |
+
+---
+
+## Phase 1 Enhancement: Context Enrichment (no LLM)
+
+The current tag text is nearly useless: `auto-tagged: coding (tools: edit, exec, read, write)`. It tells you *what kind* of work but not *what* you were working on. This enhancement extracts richer context from tool call inputs — which are already in the JSONL — without any LLM.
+
+### What tool inputs contain
+
+| Tool | Input field | Value |
+|------|-------------|-------|
+| `Read` | `path` / `file_path` | Absolute file path |
+| `Write` | `path` / `file_path` | Absolute file path |
+| `Edit` | `path` / `file_path` | Absolute file path |
+| `exec` | `command` | Shell command string |
+| `web_search` | `query` | Search query string |
+| `web_fetch` | `url` | URL |
+
+Session header (first JSONL line) also contains `cwd` — the working directory at session start.
+
+### New functions
+
+**`extract_project(calls, cwd)`** → `str | None`
+
+Maps file paths to a human-readable project name:
+- `~/.openclaw/workspace/...` → `workspace`
+- `~/work/<name>/...` → `<name>` (e.g. `claw-monitor`, `symtrack`, `tailscale-funname`)
+- `~/work/research/...` → `research`
+- No paths, has cwd → derive from cwd using same rules
+- Nothing → `None`
+
+When multiple projects appear in one window, the most frequently referenced wins.
+
+**`extract_search_queries(calls)`** → `list[str]`
+
+Collects query strings from `web_search` tool inputs. Truncated to 40 chars each. Up to 3 returned.
+
+**`extract_exec_commands(calls)`** → `list[str]`
+
+Collects meaningful exec commands — skips trivial ones (`ls`, `pwd`, `echo`, `sleep`, `cat` single-word). Truncated to 60 chars each. Up to 2 returned.
+
+**`is_heartbeat(calls)`** → `bool`
+
+Returns True if the tool call pattern looks like a routine heartbeat check rather than real work:
+- All tool names are in: `{exec, memory_search, memory_get, web_fetch, session_status, cron}`
+- No file-editing tools: no `Write`, `Edit`, `Read`
+- No `web_search`
+- No `sessions_spawn`
+- ≤ 8 tool calls total
+
+If `is_heartbeat` is True, the category is overridden to `heartbeat` regardless of what `classify()` returned.
+
+**`build_tag_text(category, calls, cwd)`** → `str`
+
+Composes the human-readable tag text from the above:
+
+| Category | Example output |
+|----------|---------------|
+| `coding` | `coding \| claw-monitor \| CombinedChart.tsx, page.tsx` |
+| `research` | `research \| tailscale rename API, headscale tcd source` |
+| `agent` | `agent \| claw-monitor` |
+| `heartbeat` | `heartbeat` |
+| `conversation` | `conversation` |
+| `idle` | `idle` |
+
+Rules:
+- Always include category
+- Append `| <project>` if project detected
+- For `coding`/`agent`: append `| <filenames>` (basenames only, up to 3, deduped)
+- For `research`: append `| <queries>` instead of files
+- Never include full paths (too long for the tag log)
+
+### Tag text examples
+
+```
+coding | claw-monitor | CombinedChart.tsx, page.tsx
+research | tailscale rename API, headscale tcd source code
+coding | workspace | auto_tagger.py, MEMORY.md
+agent | claw-monitor
+heartbeat
+conversation | workspace
+```
+
+### Heartbeat gating
+
+The cron currently fires even during heartbeat cycles (a handful of `exec` + `memory_search` calls, no real work). This produces noise. With `is_heartbeat()`:
+- If detected as heartbeat: tag as `heartbeat` (not `coding` or `conversation`)
+- Heartbeat tags are still suppressed by the duplicate suppression logic if the last tag was also `heartbeat` within 20 minutes
 
 ---
 
@@ -501,11 +589,28 @@ pytest tests/test_auto_tagger.py -v
 
 ## Implementation Checklist
 
-- [ ] Test file written (`tests/test_auto_tagger.py`) — all groups above
-- [ ] All tests confirmed failing (red)
-- [ ] `scripts/auto_tagger.py` implemented (green)
-- [ ] All unit tests passing
-- [ ] Integration tests passing (Group 8)
-- [ ] System cron entry installed
-- [ ] Dashboard verified: backdated tags appear correctly
-- [ ] INSTRUCTIONS.md updated
+**Phase 0 — Core tagger**
+- [x] Test file written (`tests/test_auto_tagger.py`) — Groups 1–8
+- [x] All tests confirmed failing (red)
+- [x] `scripts/auto_tagger.py` implemented (green)
+- [x] All 42 unit tests passing
+- [x] Integration tests skipped (pending CM_TEST_PORT)
+- [x] System cron entry installed
+- [x] First live run confirmed 08:30 PST 2026-03-08
+- [x] INSTRUCTIONS.md updated
+
+**Phase 1 — Context enrichment (no LLM)**
+- [ ] Tests written for Group 9 (context enrichment) — red
+- [ ] `extract_project()` implemented
+- [ ] `extract_search_queries()` implemented
+- [ ] `extract_exec_commands()` implemented
+- [ ] `is_heartbeat()` implemented
+- [ ] `build_tag_text()` implemented
+- [ ] `get_session_cwd()` implemented (reads cwd from session JSONL header)
+- [ ] All Group 9 tests passing
+- [ ] Live run verified: tag text contains project and context info
+
+**Phase 2 — LLM-assisted (future)**
+- [ ] Qwen integration for ambiguous windows
+- [ ] Rate limiting (once per 30 min max)
+- [ ] Graceful fallback to Phase 1 text

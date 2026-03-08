@@ -407,6 +407,211 @@ class TestQwenStateCheck:
 # Group 8: End-to-End Integration
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Group 9: Context Enrichment (Phase 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestContextEnrichment:
+
+    def _call(self, tool_name, path=None, command=None, query=None, url=None, minutes_ago=5):
+        inp = {}
+        if path:
+            inp["path"] = path
+        if command:
+            inp["command"] = command
+        if query:
+            inp["query"] = query
+        if url:
+            inp["url"] = url
+        return {"name": tool_name, "ts": make_ts(minutes_ago), "input": inp}
+
+    # --- extract_project ---
+
+    def test_9_1_project_from_work_dir_file(self):
+        """File path under ~/work/<project>/ → project name."""
+        calls = [self._call("Edit", path="/home/david/work/claw-monitor/web/src/components/CombinedChart.tsx")]
+        assert at.extract_project(calls, cwd=None) == "claw-monitor"
+
+    def test_9_2_project_most_common_wins(self):
+        """When multiple projects present, most-referenced wins."""
+        calls = [
+            self._call("Edit", path="/home/david/work/claw-monitor/web/src/components/CombinedChart.tsx"),
+            self._call("Edit", path="/home/david/work/claw-monitor/web/src/app/page.tsx"),
+            self._call("Read", path="/home/david/work/claw-monitor/README.md"),
+            self._call("Edit", path="/home/david/.openclaw/workspace/MEMORY.md"),
+        ]
+        assert at.extract_project(calls, cwd=None) == "claw-monitor"
+
+    def test_9_3_project_workspace_path(self):
+        """~/.openclaw/workspace/ paths → 'workspace'."""
+        calls = [self._call("Write", path="/home/david/.openclaw/workspace/notes/foo.md")]
+        assert at.extract_project(calls, cwd=None) == "workspace"
+
+    def test_9_4_project_research_path(self):
+        """~/work/research/ paths → 'research'."""
+        calls = [self._call("Read", path="/home/david/work/research/software/git/git.md")]
+        assert at.extract_project(calls, cwd=None) == "research"
+
+    def test_9_5_project_fallback_to_cwd(self):
+        """No file paths → fall back to cwd."""
+        calls = [self._call("exec", command="git status")]
+        assert at.extract_project(calls, cwd="/home/david/work/symtrack") == "symtrack"
+
+    def test_9_6_project_no_paths_no_cwd_returns_none(self):
+        """No file paths, no cwd → None."""
+        calls = [self._call("exec", command="ls")]
+        assert at.extract_project(calls, cwd=None) is None
+
+    def test_9_7_project_from_exec_cd_command(self):
+        """cd command in exec reveals project."""
+        calls = [self._call("exec", command="cd ~/work/tailscale-funname && python3 auto_tagger.py")]
+        assert at.extract_project(calls, cwd=None) == "tailscale-funname"
+
+    # --- extract_search_queries ---
+
+    def test_9_8_search_queries_extracted(self):
+        """web_search queries are collected."""
+        calls = [
+            self._call("web_search", query="tailscale rename API endpoint"),
+            self._call("web_search", query="headscale tcd source code"),
+        ]
+        queries = at.extract_search_queries(calls)
+        assert len(queries) == 2
+        assert "tailscale rename API endpoint" in queries[0]
+
+    def test_9_9_search_queries_truncated(self):
+        """Long queries are truncated to 40 chars."""
+        long_q = "a" * 80
+        calls = [self._call("web_search", query=long_q)]
+        queries = at.extract_search_queries(calls)
+        assert len(queries[0]) <= 40
+
+    def test_9_10_search_queries_max_three(self):
+        """At most 3 queries returned."""
+        calls = [self._call("web_search", query=f"query {i}") for i in range(6)]
+        queries = at.extract_search_queries(calls)
+        assert len(queries) <= 3
+
+    def test_9_11_search_queries_empty_if_none(self):
+        """No web_search calls → empty list."""
+        calls = [self._call("exec", command="git status")]
+        assert at.extract_search_queries(calls) == []
+
+    # --- is_heartbeat ---
+
+    def test_9_12_is_heartbeat_true_for_heartbeat_pattern(self):
+        """Small set of exec+memory_search+web_fetch → heartbeat."""
+        calls = [
+            self._call("exec", command="~/.openclaw/workspace/scripts/check-claude-limits.sh"),
+            self._call("memory_search"),
+            self._call("web_fetch", url="https://status.anthropic.com/api/v2/status.json"),
+        ]
+        assert at.is_heartbeat(calls) is True
+
+    def test_9_13_is_heartbeat_false_with_edit(self):
+        """Edit tool present → not heartbeat."""
+        calls = [
+            self._call("exec", command="ls"),
+            self._call("Edit", path="/home/david/work/claw-monitor/README.md"),
+        ]
+        assert at.is_heartbeat(calls) is False
+
+    def test_9_14_is_heartbeat_false_with_web_search(self):
+        """web_search present → not heartbeat."""
+        calls = [
+            self._call("exec", command="ls"),
+            self._call("web_search", query="tailscale API"),
+        ]
+        assert at.is_heartbeat(calls) is False
+
+    def test_9_15_is_heartbeat_false_with_too_many_calls(self):
+        """More than 8 tool calls → not heartbeat even if all are exec."""
+        calls = [self._call("exec", command="ls") for _ in range(12)]
+        assert at.is_heartbeat(calls) is False
+
+    def test_9_16_is_heartbeat_false_with_sessions_spawn(self):
+        """sessions_spawn → definitely not heartbeat."""
+        calls = [self._call("sessions_spawn")]
+        assert at.is_heartbeat(calls) is False
+
+    def test_9_17_heartbeat_overrides_classification(self):
+        """is_heartbeat pattern overrides classify() result → category = heartbeat."""
+        calls = [
+            self._call("exec", command="check-claude-limits.sh"),
+            self._call("memory_search"),
+        ]
+        # classify() would say 'coding' (exec present), but is_heartbeat wins
+        category = at.classify(calls, has_messages=True)
+        final = at.apply_heartbeat_override(category, calls)
+        assert final == "heartbeat"
+
+    # --- build_tag_text ---
+
+    def test_9_18_build_tag_text_coding_with_project_and_files(self):
+        """Coding tag includes project and file basenames."""
+        calls = [
+            self._call("Edit", path="/home/david/work/claw-monitor/web/src/components/CombinedChart.tsx"),
+            self._call("Edit", path="/home/david/work/claw-monitor/web/src/app/page.tsx"),
+        ]
+        text = at.build_tag_text("coding", calls, cwd=None)
+        assert "coding" in text
+        assert "claw-monitor" in text
+        assert "CombinedChart.tsx" in text
+
+    def test_9_19_build_tag_text_research_with_queries(self):
+        """Research tag includes search queries instead of files."""
+        calls = [
+            self._call("web_search", query="tailscale rename API"),
+            self._call("web_search", query="headscale tcd"),
+        ]
+        text = at.build_tag_text("research", calls, cwd=None)
+        assert "research" in text
+        assert "tailscale rename API" in text
+
+    def test_9_20_build_tag_text_heartbeat_minimal(self):
+        """Heartbeat tag text is just 'heartbeat'."""
+        calls = [self._call("exec", command="check-limits.sh")]
+        text = at.build_tag_text("heartbeat", calls, cwd=None)
+        assert text == "heartbeat"
+
+    def test_9_21_build_tag_text_conversation_no_tools(self):
+        """Conversation with no tools → 'conversation'."""
+        text = at.build_tag_text("conversation", [], cwd=None)
+        assert text == "conversation"
+
+    def test_9_22_build_tag_text_no_full_paths(self):
+        """Tag text never contains full absolute paths."""
+        calls = [self._call("Edit", path="/home/david/work/claw-monitor/web/src/components/CombinedChart.tsx")]
+        text = at.build_tag_text("coding", calls, cwd=None)
+        assert "/home/david" not in text
+
+    def test_9_23_build_tag_text_dedupes_filenames(self):
+        """Same filename edited twice → appears only once."""
+        calls = [
+            self._call("Edit", path="/home/david/work/claw-monitor/README.md"),
+            self._call("Write", path="/home/david/work/claw-monitor/README.md"),
+        ]
+        text = at.build_tag_text("coding", calls, cwd=None)
+        assert text.count("README.md") == 1
+
+    # --- get_session_cwd ---
+
+    def test_9_24_get_session_cwd_from_jsonl(self, tmp_path):
+        """Session header line contains cwd → extracted correctly."""
+        header = json.dumps({
+            "type": "session",
+            "timestamp": ts_str(make_ts(60)),
+            "cwd": "/home/david/work/symtrack"
+        })
+        path = write_jsonl(tmp_path, [header])
+        assert at.get_session_cwd(path) == "/home/david/work/symtrack"
+
+    def test_9_25_get_session_cwd_missing_returns_none(self, tmp_path):
+        """No session header → returns None without error."""
+        path = write_jsonl(tmp_path, [make_tool_call_line("exec")])
+        assert at.get_session_cwd(path) is None
+
+
 class TestEndToEnd:
     """
     These tests require a running claw-monitor instance on a test port.
