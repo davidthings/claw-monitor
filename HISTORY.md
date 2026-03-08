@@ -790,6 +790,23 @@ TypeScript clean, build passed, claw-web restarted.
 
 ---
 
+## 2026-03-08 — Chart x-axis right-edge fix
+
+**Who did what:** David reported; DavidBot fixed.
+
+### Change
+
+The Combined Chart on the Overview page had `domain={["auto", "auto"]}` on the Recharts XAxis. Recharts' `"auto"` snaps the axis bounds to "nice" rounded intervals, causing the right edge to extend to a future rounded time rather than the actual current time — leaving a gap and making the chart feel stale.
+
+**Fix:** Pin the right domain bound to the actual current timestamp:
+```js
+domain={[(dataMin: number) => dataMin, () => Math.floor(Date.now() / 1000)]}
+```
+
+The left bound remains data-driven; the right bound is always `now`, recalculated on every render. As the page refreshes every 10 seconds, the right edge advances naturally. Tags near the right edge are no longer clipped. Updated `docs/UI_SPEC.md` to document this requirement explicitly (item 5 under Combined Chart design notes).
+
+---
+
 ## 2026-03-08 — Auto-tagger design + agent reliability notes
 
 **Who did what:** David raised the issue of missed session-start tags; DavidBot designed the auto-tagger and wrote design + test plan docs.

@@ -148,6 +148,8 @@ The Overview page makes the following API calls on load, then subscribes to SSE 
 
 4. **Time range** — Selectable, using the **same range picker as the Metrics page** (e.g. Last 30m / 1h / 2h / 6h / 24h / custom). No hardcoded default — persist the last-used range in `localStorage`.
 
+5. **X-axis right edge — always pinned to now** — The chart's right boundary must always be the current time, not a rounded/snapped value. Recharts' `domain={["auto", "auto"]}` snaps to "nice" intervals and leaves a gap between the last data point and the visible right edge. The correct implementation pins the right domain bound to `Math.floor(Date.now() / 1000)` (recalculated each render): `domain={[(dataMin) => dataMin, () => Math.floor(Date.now() / 1000)]}`. This ensures the chart always ends at *right now*, tag markers near the right edge are never clipped, and the view advances naturally as data refreshes.
+
 ---
 
 *Spec authored: 2026-03-06. No implementation yet.*
