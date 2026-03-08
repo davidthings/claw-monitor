@@ -801,7 +801,7 @@ The Combined Chart's x-axis was not aligned to the current time. Three iteration
 
 **Attempt 2 (8035665):** Changed left bound to `() => Math.floor(Date.now() / 1000) - rangeSeconds`. Correct intent, but same problem: both bounds are functions calling `Date.now()` on every render. Made the animation artifact worse — data started on the right and animated left.
 
-**Correct fix (planned, not yet committed):** Pass `from` and `to` as stable state values from `page.tsx` down to `CombinedChart`. Set them once per `fetchData` call, atomically with the data. Use static numbers as domain `[from, to]` — Recharts only triggers animation when values actually change. Also: disable `isAnimationActive` on all Lines/Areas — live monitoring charts should never animate.
+**Correct fix (commit 9216301):** Added `chartBounds` state (`{ from, to }`) to `page.tsx`, set atomically at the end of each `fetchData` call. Replaced `rangeSeconds` prop on `CombinedChart` with explicit `from` and `to` number props. Domain is now `[from, to]` — static numbers, only change when new data arrives. Added `isAnimationActive={false}` to all five `<Line>` elements. Tag clustering updated to use `to - from` as the window size.
 
 ---
 
