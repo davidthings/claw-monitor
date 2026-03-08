@@ -49,7 +49,8 @@ interface TagCluster {
 interface Props {
   data: ChartPoint[];
   tags: Tag[];
-  rangeSeconds: number;
+  from: number;
+  to: number;
 }
 
 function formatTime(ts: number) {
@@ -67,9 +68,9 @@ function formatTimeFull(ts: number) {
   });
 }
 
-function clusterTags(tags: Tag[], rangeSeconds: number, chartWidth: number): TagCluster[] {
+function clusterTags(tags: Tag[], windowSeconds: number, chartWidth: number): TagCluster[] {
   if (tags.length === 0) return [];
-  const threshold = (rangeSeconds / Math.max(chartWidth, 1)) * 8;
+  const threshold = (windowSeconds / Math.max(chartWidth, 1)) * 8;
   const sorted = [...tags].sort((a, b) => a.ts - b.ts);
   const clusters: TagCluster[] = [];
   let current: TagCluster = { ts: sorted[0].ts, tags: [sorted[0]], category: sorted[0].category };
@@ -149,7 +150,7 @@ function CustomTooltip({ active, payload, label }: { active?: boolean; payload?:
   );
 }
 
-export default function CombinedChart({ data, tags, rangeSeconds }: Props) {
+export default function CombinedChart({ data, tags, from, to }: Props) {
   const [hoveredCluster, setHoveredCluster] = useState<{ cluster: TagCluster; x: number; y: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(800);
@@ -158,9 +159,10 @@ export default function CombinedChart({ data, tags, rangeSeconds }: Props) {
     setChartWidth(w);
   }, []);
 
+  const windowSeconds = to - from;
   const clusters = useMemo(
-    () => clusterTags(tags, rangeSeconds, chartWidth),
-    [tags, rangeSeconds, chartWidth]
+    () => clusterTags(tags, windowSeconds, chartWidth),
+    [tags, windowSeconds, chartWidth]
   );
 
   const handleTagHover = useCallback((cluster: TagCluster | null, x: number, y: number) => {
@@ -180,10 +182,7 @@ export default function CombinedChart({ data, tags, rangeSeconds }: Props) {
             dataKey="ts"
             type="number"
             scale="time"
-            domain={[
-              () => Math.floor(Date.now() / 1000) - rangeSeconds,
-              () => Math.floor(Date.now() / 1000),
-            ]}
+            domain={[from, to]}
             tickFormatter={formatTime}
             stroke="#888"
           />
@@ -200,11 +199,11 @@ export default function CombinedChart({ data, tags, rangeSeconds }: Props) {
           />
           <Tooltip content={<CustomTooltip />} />
           <Legend />
-          <Line yAxisId="left" type="monotone" dataKey="cpu" stroke="#4ade80" dot={false} name="CPU (cores)" strokeWidth={1.5} />
-          <Line yAxisId="left" type="monotone" dataKey="mem" stroke="#60a5fa" dot={false} name="Memory (GB)" strokeWidth={1.5} />
-          <Line yAxisId="right" type="monotone" dataKey="gpu" stroke="#e879f9" dot={false} name="GPU (%)" strokeWidth={1.5} />
-          <Line yAxisId="right" type="monotone" dataKey="net" stroke="#fb923c" dot={false} name="Network (KB/s)" strokeWidth={1.5} />
-          <Line yAxisId="right" type="monotone" dataKey="tokens" stroke="#facc15" dot={false} name="Tokens (tok/min)" strokeWidth={1.5} />
+          <Line yAxisId="left" type="monotone" dataKey="cpu" stroke="#4ade80" dot={false} name="CPU (cores)" strokeWidth={1.5} isAnimationActive={false} />
+          <Line yAxisId="left" type="monotone" dataKey="mem" stroke="#60a5fa" dot={false} name="Memory (GB)" strokeWidth={1.5} isAnimationActive={false} />
+          <Line yAxisId="right" type="monotone" dataKey="gpu" stroke="#e879f9" dot={false} name="GPU (%)" strokeWidth={1.5} isAnimationActive={false} />
+          <Line yAxisId="right" type="monotone" dataKey="net" stroke="#fb923c" dot={false} name="Network (KB/s)" strokeWidth={1.5} isAnimationActive={false} />
+          <Line yAxisId="right" type="monotone" dataKey="tokens" stroke="#facc15" dot={false} name="Tokens (tok/min)" strokeWidth={1.5} isAnimationActive={false} />
           {clusters.map((c, i) => (
             <ReferenceLine
               key={i}

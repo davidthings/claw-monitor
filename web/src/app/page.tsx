@@ -158,6 +158,10 @@ export default function HomePage() {
   const [disk, setDisk] = useState<DiskRow[]>([]);
   const [tokenEvents, setTokenEvents] = useState<{ ts: number; total: number }[]>([]);
   const [range, setRange] = useState(getInitialRange);
+  const [chartBounds, setChartBounds] = useState<{ from: number; to: number }>(() => {
+    const to = Math.floor(Date.now() / 1000);
+    return { from: to - getInitialRange(), to };
+  });
 
   const handleRangeChange = useCallback((val: number) => {
     setRange(val);
@@ -206,6 +210,7 @@ export default function HomePage() {
       if (!latestDisk[r.dir_key]) latestDisk[r.dir_key] = r;
     }
     setDisk(Object.values(latestDisk));
+    setChartBounds({ from, to: now });
   }, [range]);
 
   useEffect(() => {
@@ -323,7 +328,7 @@ export default function HomePage() {
             ))}
           </div>
         </div>
-        <CombinedChart data={chartWithTokens} tags={tags} rangeSeconds={range} />
+        <CombinedChart data={chartWithTokens} tags={tags} from={chartBounds.from} to={chartBounds.to} />
       </div>
     </div>
   );
