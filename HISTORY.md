@@ -859,3 +859,28 @@ During a morning session (Signal, ~06:00–08:15 PST), David observed that David
 - `scripts/auto_tagger.py` implemented (all 42 tests green, 4 integration tests skipped pending CM_TEST_PORT) ✅
 - System cron installed: `*/10 * * * * auto_tagger.py` ✅
 - First live run confirmed: 2026-03-08 08:30 PST — tagged `coding` (backdated to 15:26 UTC), 20 tool calls detected ✅
+
+---
+
+## 2026-03-08 — Chart data/axes mismatch bug (morning session)
+
+**Who did what:** David reported; DavidBot diagnosed; delegating to Claude Code via claw-monitor-builder subagent.
+
+### Problem
+After the axis domain fix (commit 9216301 — pinning right edge to `now`), the X-axis range is correct. But chart data lines don't align properly with the axes. The ranges are inconsistent between data and axes.
+
+### Root cause analysis (DavidBot code review)
+
+Two bugs found in `pivotMetrics()` in `web/src/app/page.tsx`:
+
+1. **Net calculation missing rate conversion:** `entry.net = (row.net_in_kb || 0) + (row.net_out_kb || 0)` — stores raw KB deltas, not KB/s. The DB's `net_in_kb`/`net_out_kb` columns are deltas since last sample. To get KB/s, must divide by `sample_interval_s`. The stat card code does this correctly; `pivotMetrics` does not. Causes network line to be wildly off scale relative to the Y-axis label ("KB/s").
+
+2. **Memory uses Math.max instead of sum:** Multiple rows exist per timestamp (one per group: openclaw-core, openclaw-browser, openclaw-agent). Memory RSS is additive — total RSS is the sum, not the max. `Math.max` understates total memory usage.
+
+Possibly also: verify no additional domain/data timestamp misalignment introduced by the chartBounds fix.
+
+### Participants
+- **DavidBot** — orchestrator; HISTORY author
+- **claw-monitor-builder** — subagent directing Claude Code
+- **Claude Code** — implements fix, rebuilds, redeploys
+
