@@ -1,0 +1,511 @@
+# claw-monitor Auto-Tagger
+
+*Status: Planned — not yet implemented*
+*Added: 2026-03-08*
+
+---
+
+## Problem
+
+claw-monitor tagging relies on the AI agent (clawbot) remembering to call `tag.sh` at session start and when work type changes. This is unreliable — the agent frequently skips the startup tag when diving into the first message. Tags are then missing or backdated imprecisely.
+
+The auto-tagger solves this by running independently of the agent on a fixed schedule, observing what the agent has been doing, and tagging retroactively based on tool call patterns in the session history.
+
+---
+
+## Design Overview
+
+A Python script (`scripts/auto-tag.sh` / `auto_tagger.py`) runs every 10 minutes via system cron. It:
+
+1. Locates the active OpenClaw session file on disk
+2. Reads tool calls from the last ~15 minutes of session history (window intentionally overlaps cron interval)
+3. Applies heuristic rules to determine the dominant work type for that window
+4. Checks the current claw-monitor tag to avoid redundant tagging
+5. If the work type has changed (or no tag exists), fires a new tag — backdated to when the detected activity began
+
+No LLM is involved. It is a pure Python script reading JSON files and making HTTP calls.
+
+---
+
+## Data Source: OpenClaw Session Files
+
+OpenClaw stores session history as JSONL files:
+
+```
+~/.openclaw/agents/main/sessions/sessions.json       ← index: session key → JSONL path
+~/.openclaw/agents/main/sessions/<uuid>.jsonl        ← message history
+```
+
+**Finding the session file:**
+```python
+import json
+
+sessions_index = json.load(open(
+    "~/.openclaw/agents/main/sessions/sessions.json"
+))
+session = sessions_index.get("agent:main:signal:direct:+15303386428", {})
+jsonl_path = session.get("sessionFile")
+```
+
+**JSONL record structure (tool calls):**
+```json
+{
+  "type": "message",
+  "timestamp": "2026-03-08T13:15:28.000Z",
+  "message": {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "toolCall",
+        "name": "web_search",
+        "input": { "query": "..." }
+      }
+    ]
+  }
+}
+```
+
+Each message can contain multiple content blocks. Tool calls have `type: "toolCall"` and a `name` field.
+
+**Extracting tool calls from the window:**
+```python
+from datetime import datetime, timezone, timedelta
+
+def get_recent_tool_calls(jsonl_path, window_minutes=15):
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    calls = []
+    with open(jsonl_path) as f:
+        for line in f:
+            record = json.loads(line)
+            ts_str = record.get("timestamp")
+            if not ts_str:
+                continue
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts < cutoff:
+                continue
+            for block in record.get("message", {}).get("content", []):
+                if block.get("type") == "toolCall":
+                    calls.append({
+                        "name": block["name"],
+                        "ts": ts,
+                        "input": block.get("input", {})
+                    })
+    return sorted(calls, key=lambda c: c["ts"])
+```
+
+---
+
+## Heuristic Classification Rules
+
+Tool calls are mapped to work-type categories in priority order. The first matching rule wins.
+
+### Tool → Category Mapping
+
+| Tool name(s) | Category | Notes |
+|---|---|---|
+| `sessions_spawn` | `agent` | Spawned a subagent |
+| `web_search`, `web_fetch`, `browser` | `research` | Web research |
+| `exec`, `Write`, `Edit`, `Read` | `coding` | File/shell work |
+| `image`, `pdf` | `research` | Document/image analysis |
+| `tts`, `message` | `conversation` | Output-only tools |
+| `memory_search`, `memory_get` | `conversation` | Memory recall (context for reply) |
+| `cron` | `other` | Cron management |
+| Any tool call | `conversation` | Fallback — something was happening |
+
+### Priority Order
+
+When multiple categories appear in the window, highest priority wins:
+
+```
+agent > coding > research > conversation > other > idle
+```
+
+Rationale: `agent` and `coding` are the most resource-intensive and meaningful to capture. `research` is a distinct work mode. `conversation` is the default fallback.
+
+### Special Cases
+
+**Mixed window (coding + research):** Priority rule applies. If both `exec` and `web_search` appear, classify as `coding` (higher priority). A future LLM upgrade could split the window more precisely.
+
+**Qwen running:** Check `~/.openclaw/workspace/qwen-state.json`. If it exists and `started` timestamp is within the last 4 hours, prepend a `qwen` tag at the Qwen start time (if not already tagged). Qwen calls themselves appear as `exec` tool calls in the session, so they'll be classified as `coding` by the heuristic — the separate Qwen state check is needed to correctly label Qwen sessions.
+
+**No tool calls in window, but messages exist:** `conversation` — the agent was reading and replying without using tools.
+
+**No activity at all (no messages in window):** `idle`.
+
+### Determining the Tag Start Time (Backdating)
+
+The tag timestamp is set to the **earliest tool call** of the winning category in the window — but not earlier than the timestamp of the last existing claw-monitor tag. This ensures:
+- Tags don't overlap or precede existing tags
+- The tagged period reflects when the work actually started, not when the script ran
+
+```python
+def get_backdate_ts(calls, category, last_tag_ts):
+    matching = [c for c in calls if tool_to_category(c["name"]) == category]
+    if not matching:
+        return datetime.now(timezone.utc)
+    earliest = matching[0]["ts"]
+    if last_tag_ts and earliest < last_tag_ts:
+        earliest = last_tag_ts
+    return earliest
+```
+
+---
+
+## Integration: System Cron
+
+The auto-tagger runs via **system cron** (not OpenClaw cron) — it is a deterministic script, not an agent turn. No LLM is involved.
+
+**Install:**
+```bash
+crontab -e
+```
+
+**Entry (every 10 minutes):**
+```
+*/10 * * * * /home/david/work/claw-monitor/scripts/auto_tagger.py >> /home/david/.openclaw/logs/auto-tagger.log 2>&1
+```
+
+**Why system cron, not OpenClaw cron:**
+- OpenClaw cron `agentTurn` jobs invoke the LLM — this task needs no LLM
+- OpenClaw cron `systemEvent` jobs inject into the main session — we don't want to interrupt it
+- System cron runs the script directly: deterministic, cheap, no token cost, always fires
+
+---
+
+## Script: `scripts/auto_tagger.py`
+
+```
+~/work/claw-monitor/scripts/auto_tagger.py
+```
+
+**Inputs:**
+- `~/.openclaw/agents/main/sessions/sessions.json` — session index
+- `<sessionFile>.jsonl` — session history (read-only, tail of file)
+- `http://localhost:7432/api/tags?limit=1` — last claw-monitor tag
+- `~/.openclaw/workspace/qwen-state.json` — Qwen running state (optional)
+- `CM_PORT` env var (default 7432)
+
+**Outputs:**
+- `POST http://localhost:7432/api/tags` (fire-and-forget, only if tag changed)
+- Log line to stdout (captured by cron to log file)
+
+**Behaviour:**
+- Reads last 15 minutes of tool calls from the active Signal session JSONL
+- Classifies dominant work type via heuristics
+- Gets last claw-monitor tag via API
+- If category changed OR last tag was more than 20 minutes ago: fires new tag with backdated timestamp
+- If category unchanged AND last tag was recent: exits silently (no duplicate tags)
+- Always exits 0 — failure is silent (claw-monitor may be down; that's fine)
+
+**Config (top of script, editable):**
+```python
+WINDOW_MINUTES = 15          # how far back to look for tool calls
+SESSION_KEY = "agent:main:signal:direct:+15303386428"
+CM_PORT = int(os.getenv("CM_PORT", "7432"))
+RETAG_AFTER_MINUTES = 20     # re-tag even if same category if it's been this long
+```
+
+---
+
+## Failure Modes
+
+| Scenario | Behaviour |
+|---|---|
+| claw-monitor not running | HTTP call fails silently; script exits 0; no harm |
+| Session file not found | Log warning, exit 0 |
+| Session file unreadable (locked/corrupt) | Catch exception, log, exit 0 |
+| No activity in window | Tags `idle` (or extends existing tag silently if already idle) |
+| Ambiguous category (close call) | Priority rule picks deterministically; accuracy ≈ 80% |
+| Cron not firing | System cron failure; unrelated to OpenClaw; check `crontab -l` |
+
+---
+
+## Future: LLM-Assisted Classification
+
+The heuristic approach has known limitations:
+- Mixed-mode sessions (coding + research) get whichever category has higher priority, not the dominant one by time
+- Tool names don't capture nuance (e.g. `exec` for Qwen vs. `exec` for git operations)
+- Short tool-free conversations are always `conversation` regardless of topic
+
+**Future upgrade path:**
+
+Phase 1 (current): pure heuristics — tool name → category, priority rules.
+
+Phase 2 (future): heuristic pre-filter + LLM refinement when ambiguity is detected.
+
+```
+heuristic → confident? → tag and done
+         ↓ ambiguous?
+         → summarise recent messages (last 5 user/assistant pairs)
+         → ask Qwen (if already running): "classify this work: [summary]"
+         → use LLM classification only if Qwen is already running (zero added cost)
+         → fall back to heuristic if Qwen not running
+```
+
+The key constraint: **never start Qwen just to classify a tag**. LLM upgrade only activates when Qwen is already running for other reasons. No added token cost, no added latency on cold paths.
+
+Phase 3 (future): rolling window analysis — instead of a single category per window, detect transitions within the window and emit multiple backdated tags (e.g. `research` 13:10→13:20, `coding` 13:20→13:30).
+
+---
+
+## Test-First Development Plan
+
+Tests are written before implementation. No code ships without a passing test. This follows the TDD mandate established in `TEST_PLAN.md §0.4`.
+
+### Test file location
+
+```
+~/work/claw-monitor/tests/test_auto_tagger.py   ← unit tests (pytest)
+```
+
+Run with:
+```bash
+cd ~/work/claw-monitor
+pytest tests/test_auto_tagger.py -v
+```
+
+---
+
+### Test Group 1: JSONL Parsing
+
+**1.1 — Extract tool calls from window**
+- Given: a JSONL file with tool calls at known timestamps
+- When: `get_recent_tool_calls(path, window_minutes=15)` is called
+- Then: returns only tool calls within the window, in timestamp order
+
+**1.2 — Ignore non-toolCall content blocks**
+- Given: JSONL with messages containing text blocks and thinking blocks (not tool calls)
+- When: parsed
+- Then: only `type: "toolCall"` blocks are returned; others are ignored
+
+**1.3 — Handle empty JSONL / no tool calls in window**
+- Given: JSONL with no tool calls in the last 15 minutes
+- When: parsed
+- Then: returns empty list (not an error)
+
+**1.4 — Handle missing or nonexistent session file**
+- Given: sessionFile path that does not exist
+- When: called
+- Then: returns empty list, logs warning, exits 0
+
+**1.5 — Handle malformed JSONL lines**
+- Given: JSONL with one corrupt line among valid lines
+- When: parsed
+- Then: corrupt line is skipped, valid lines are processed, no exception raised
+
+**1.6 — Timestamp parsing: UTC ISO-8601 with Z suffix**
+- Given: timestamp string `"2026-03-08T13:15:28.000Z"`
+- When: parsed
+- Then: returns correct UTC datetime
+
+---
+
+### Test Group 2: Heuristic Classification
+
+**2.1 — `sessions_spawn` → `agent`**
+- Given: window contains a `sessions_spawn` tool call
+- When: classified
+- Then: category is `agent`
+
+**2.2 — `exec` + `Write` → `coding`**
+- Given: window contains `exec` and `Write` tool calls, no web calls
+- When: classified
+- Then: category is `coding`
+
+**2.3 — `web_search` → `research`**
+- Given: window contains only `web_search` calls
+- When: classified
+- Then: category is `research`
+
+**2.4 — `web_fetch` → `research`**
+- As above with `web_fetch`
+
+**2.5 — `browser` → `research`**
+- As above with `browser`
+
+**2.6 — `tts` only → `conversation`**
+- Given: window contains only `tts` calls
+- When: classified
+- Then: category is `conversation`
+
+**2.7 — No tool calls, but messages exist → `conversation`**
+- Given: window has messages but no tool calls
+- When: classified
+- Then: category is `conversation`
+
+**2.8 — No activity → `idle`**
+- Given: empty window (no messages, no tool calls)
+- When: classified
+- Then: category is `idle`
+
+**2.9 — `cron` only → `other`**
+- Given: window contains only `cron` tool calls
+- When: classified
+- Then: category is `other`
+
+---
+
+### Test Group 3: Priority Rules (Mixed Windows)
+
+**3.1 — `agent` beats `coding`**
+- Given: window contains both `sessions_spawn` and `exec` calls
+- When: classified
+- Then: category is `agent`
+
+**3.2 — `coding` beats `research`**
+- Given: window contains both `exec` and `web_search` calls
+- When: classified
+- Then: category is `coding`
+
+**3.3 — `research` beats `conversation`**
+- Given: window contains both `web_search` and `tts` calls
+- When: classified
+- Then: category is `research`
+
+**3.4 — `agent` beats everything**
+- Given: window contains `sessions_spawn`, `exec`, `web_search`, `tts`
+- When: classified
+- Then: category is `agent`
+
+---
+
+### Test Group 4: Backdate Logic
+
+**4.1 — Backdate to earliest matching tool call**
+- Given: three `web_search` calls at T+2m, T+5m, T+8m
+- When: category is `research`, no prior tag exists
+- Then: backdate timestamp is T+2m (earliest)
+
+**4.2 — Backdate clipped to last tag timestamp**
+- Given: tool calls starting at T-20m, last claw-monitor tag at T-10m
+- When: backdate calculated
+- Then: backdate timestamp is T-10m (not T-20m — cannot precede existing tag)
+
+**4.3 — No prior tag: backdate to earliest call in window**
+- Given: no prior claw-monitor tag exists at all
+- When: backdate calculated
+- Then: backdate to earliest tool call in window
+
+**4.4 — No tool calls of winning category: backdate to now**
+- Given: category is `conversation` (fallback), but no `conversation`-category tools triggered it
+- When: backdate calculated
+- Then: backdate to `now` (safe fallback)
+
+---
+
+### Test Group 5: Duplicate Suppression
+
+**5.1 — Same category, recent tag → no new tag**
+- Given: last claw-monitor tag is `research`, 5 minutes ago; current window also classifies as `research`
+- When: decide whether to tag
+- Then: no tag fired (suppress duplicate)
+
+**5.2 — Same category, stale tag → re-tag**
+- Given: last claw-monitor tag is `research`, 25 minutes ago (> `RETAG_AFTER_MINUTES=20`); current window also classifies as `research`
+- When: decide whether to tag
+- Then: new tag fired (extend the period)
+
+**5.3 — Different category → always tag**
+- Given: last claw-monitor tag is `conversation`, 2 minutes ago; current window classifies as `coding`
+- When: decide whether to tag
+- Then: new tag fired regardless of recency
+
+**5.4 — No prior tag → always tag**
+- Given: no prior tag exists in claw-monitor
+- When: decide whether to tag
+- Then: tag fired
+
+---
+
+### Test Group 6: API Integration (mock HTTP)
+
+**6.1 — GET last tag: parses response correctly**
+- Given: mock `/api/tags` returns `[{"category": "research", "ts": 1741200000}]`
+- When: fetched
+- Then: returns `("research", datetime(...))`
+
+**6.2 — GET last tag: handles empty response (no tags yet)**
+- Given: mock `/api/tags` returns `[]`
+- When: fetched
+- Then: returns `(None, None)` without error
+
+**6.3 — GET last tag: handles claw-monitor down (connection refused)**
+- Given: no server on CM_PORT
+- When: fetched
+- Then: returns `(None, None)`, logs warning, does not raise
+
+**6.4 — POST new tag: constructs correct payload**
+- Given: category `coding`, backdate ts `2026-03-08T13:20:00Z`
+- When: posted
+- Then: request body contains correct `category`, `ts` (ISO format), `source: "auto"`, `text` mentioning tool names seen
+
+**6.5 — POST new tag: handles claw-monitor down gracefully**
+- Given: no server on CM_PORT
+- When: posted
+- Then: logs warning, exits 0, no exception raised
+
+---
+
+### Test Group 7: Qwen State Check
+
+**7.1 — Qwen running: detected correctly**
+- Given: `qwen-state.json` exists with `started` timestamp within 4 hours
+- When: checked
+- Then: returns `True`
+
+**7.2 — Qwen not running: state file absent**
+- Given: `qwen-state.json` does not exist
+- When: checked
+- Then: returns `False` without error
+
+**7.3 — Qwen state stale: started > 4 hours ago**
+- Given: `qwen-state.json` exists but `started` is 5 hours ago
+- When: checked
+- Then: returns `False`
+
+---
+
+### Test Group 8: End-to-End (Integration)
+
+**8.1 — Full run: active session, changed category, tag fires**
+- Given: real JSONL fixture with `web_search` calls in last 15 min; claw-monitor running on test port with last tag `conversation`
+- When: `auto_tagger.py` runs
+- Then: new `research` tag appears in claw-monitor DB, backdated to first web_search call
+
+**8.2 — Full run: no activity, idle tag fires**
+- Given: JSONL fixture with no activity in last 15 min; last tag was `conversation` 25 min ago
+- When: runs
+- Then: `idle` tag fires
+
+**8.3 — Full run: same category, recent tag, no tag fires**
+- Given: JSONL fixture with `exec` calls; last tag is `coding` 5 min ago
+- When: runs
+- Then: no new tag in DB
+
+**8.4 — Full run: claw-monitor down, script exits 0**
+- Given: no claw-monitor running
+- When: runs
+- Then: exits 0, no exception, log message written
+
+---
+
+## Implementation Order (Test-First)
+
+1. Write all tests in `tests/test_auto_tagger.py` (they all fail — file doesn't exist yet) ✅
+2. Implement `scripts/auto_tagger.py` function by function until tests pass
+3. Run full test suite: `pytest tests/test_auto_tagger.py -v`
+4. Integration test against live claw-monitor on test port (Group 8)
+5. Install system cron entry
+6. Monitor claw-monitor dashboard to confirm tags appear correctly
+7. Document in INSTRUCTIONS.md under "Automatic Tagging"
+
+## Implementation Checklist
+
+- [ ] Test file written (`tests/test_auto_tagger.py`) — all groups above
+- [ ] All tests confirmed failing (red)
+- [ ] `scripts/auto_tagger.py` implemented (green)
+- [ ] All unit tests passing
+- [ ] Integration tests passing (Group 8)
+- [ ] System cron entry installed
+- [ ] Dashboard verified: backdated tags appear correctly
+- [ ] INSTRUCTIONS.md updated

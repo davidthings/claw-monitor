@@ -1,6 +1,8 @@
 # Claw-Monitor Test Plan
 
-Comprehensive test plan covering the Python collector daemon, Next.js API routes, and end-to-end integration tests against the live system.
+Comprehensive test plan covering the Python collector daemon, Next.js API routes, end-to-end integration tests against the live system, and the auto-tagger script.
+
+**Auto-tagger tests:** See `docs/AUTO_TAGGER.md` for the full test specification (Groups 1–8). Test file: `tests/test_auto_tagger.py`. Run with: `pytest tests/test_auto_tagger.py -v`
 
 ---
 
