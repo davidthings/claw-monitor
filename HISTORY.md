@@ -722,3 +722,105 @@ Steps:
 ---
 
 *Future entries appended below as the project progresses.*
+
+---
+
+## 2026-03-07 — Metrics page: Disk, Tokens, Tags panels
+
+**Who did what:** David approved panel order; DavidBot updated UI_SPEC.md and README; Claude Code implementing.
+
+### Change
+Adding three missing panels to `/metrics` (Time-Series Explorer):
+
+1. **Disk** — `openclaw-total` MB over time from `disk_snapshots`, line chart
+2. **Tokens/min** — bucketed rate from `token_events`, smoothed line (reuses Overview logic)
+3. **Tags** — dedicated horizontal timeline panel at the bottom; colored markers by category, hover tooltips, 8px clustering
+
+Panel order: CPU → Memory → GPU → Network → Disk → Tokens/min → Tags
+
+Docs updated: `docs/UI_SPEC.md` (full Metrics page spec added), `README.md` (`/metrics` description updated).
+
+Implementation completed by Claude Code (~2m 16s). TypeScript and build clean. Service restarted.
+
+---
+
+## 2026-03-07 — Network stat box added
+
+**Who did what:** David requested; DavidBot implemented directly.
+
+### Change
+Added a **NETWORK** stat box to the top row of summary cards on the Overview page (`web/src/app/page.tsx`), sitting between Disk and Tokens.
+
+- **Main value:** total throughput in kB/s, auto-upgrades to MB/s when ≥ 1024
+- **Sub-label:** `↓ Xk ↑ Xk` — in/out split in the same smart unit
+- Data source: existing `grp="net"` rows (`net_in_kb`, `net_out_kb`), divided by `sample_interval_s` for a proper rate
+- Also added `sample_interval_s` to the `MetricRow` TypeScript interface (it was already returned by the API, just not typed)
+- TypeScript compile: clean (`tsc --noEmit` no errors)
+
+---
+
+## 2026-03-07 — Tags panel hover tooltip fix
+
+**Who did what:** David reported bug; DavidBot fixed directly.
+
+### Change
+The Tags timeline had `title={...}` on a 2px-wide div — effectively impossible to hover and using the browser's ugly default tooltip.
+
+Fix:
+- Wrapped each tick in a 12px invisible hover target (centered on the tick) so it's actually clickable
+- Added a styled React tooltip (mouseEnter/Leave) showing: **category** (in tag color), **time** (HH:MM), **tag text**
+- Visual 2px colored line unchanged
+- TypeScript clean, build passed, claw-web restarted
+
+---
+
+## 2026-03-07 — Metrics page CPU/Memory unit fixes
+
+**Who did what:** David reported incorrect units; DavidBot fixed directly.
+
+### Change
+Two display bugs on the Metrics `/metrics` page:
+
+1. **CPU panel** was showing raw `cpu_pct` with `unit="%"`. Changed to divide by 100 at data-build time → shows **cores** (matches Overview page). 2 decimal places.
+2. **Memory panel** was reusing `CpuAreaChart` with `unit="%"` but values were in MB → appeared as "thousands of percent". Changed to divide by 1024 → shows **GB**. 2 decimal places.
+
+Also added `unit` and `decimals` props to `CpuAreaChart` component so both Y-axis tick labels and tooltip values reflect the correct unit.
+
+TypeScript clean, build passed, claw-web restarted.
+
+---
+
+## 2026-03-08 — Auto-tagger design + agent reliability notes
+
+**Who did what:** David raised the issue of missed session-start tags; DavidBot designed the auto-tagger and wrote design + test plan docs.
+
+### Context
+
+During a morning session (Signal, ~06:00–08:15 PST), David observed that DavidBot had again failed to fire the session-start `tag.sh` call despite it being in AGENTS.md. This prompted a broader discussion about agent reliability architecture — why LLM instruction is the wrong enforcement mechanism for mechanical recurring tasks, and what deterministic alternatives exist.
+
+### Decisions
+
+**Agent reliability note** (`notes/agent-reliability-architecture.md` in workspace):
+- Documented the structural problem: the agent is simultaneously the policy and its own enforcement mechanism
+- Key principle: mechanical behaviors belong in deterministic code (hooks, cron, scripts); adaptive behaviors belong in the LLM
+- Discussed the NanoClaw "rewrite the loop" philosophy as a valid but high-maintenance alternative
+- Open question: does OpenClaw support pre/post-turn hooks? If so, session-start tagging becomes solvable without a framework rewrite.
+
+**Auto-tagger design** (`docs/AUTO_TAGGER.md`):
+- A pure Python script (`scripts/auto_tagger.py`) running every 10 minutes via system cron
+- Reads OpenClaw session JSONL files directly (no LLM, no OpenClaw API)
+- Extracts tool call names + timestamps from the last 15-minute window
+- Applies heuristic priority rules: `agent > coding > research > conversation > other > idle`
+- Backdates tags to when the detected activity actually started (clipped to after the last existing tag)
+- Suppresses duplicate tags if category unchanged and last tag is recent (< 20 min)
+- Runs as system cron (not OpenClaw cron) — OpenClaw cron has no raw-script payload type
+- Future upgrade path documented: LLM refinement when ambiguous, gated on Qwen already running (no added cost)
+
+**Test plan** (`docs/AUTO_TAGGER.md`, 8 groups, ~30 tests):
+- Test-first mandate follows `TEST_PLAN.md §0.4`
+- Groups: JSONL parsing, heuristic classification, priority rules, backdate logic, duplicate suppression, API integration (mocked), Qwen state check, end-to-end integration
+- Reference added to `TEST_PLAN.md`
+
+### Status
+- Design and test plan complete
+- Implementation not yet started (test-first: write tests before code)
