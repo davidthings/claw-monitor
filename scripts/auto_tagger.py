@@ -288,17 +288,21 @@ def get_last_tag(cm_port: int = 7432) -> tuple[str | None, datetime | None]:
 def post_tag(
     category: str,
     backdate_ts: datetime,
-    tool_names: list,
+    tool_names: list = None,
     cm_port: int = 7432,
     dry_run: bool = False,
+    tag_text: str = None,
 ) -> bool:
     """
     POST a new tag to claw-monitor.
 
     Returns True on success, False on any error.
     """
-    tool_summary = ", ".join(sorted(set(tool_names))) if tool_names else "none"
-    text = f"auto-tagged: {category} (tools: {tool_summary})"
+    if tag_text is None:
+        tool_summary = ", ".join(sorted(set(tool_names or []))) or "none"
+        text = f"auto-tagged: {category} (tools: {tool_summary})"
+    else:
+        text = tag_text
 
     payload = {
         "category": category,
@@ -354,6 +358,209 @@ def is_qwen_running(qwen_state_path: str = QWEN_STATE) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 1: Context Enrichment
+# ─────────────────────────────────────────────────────────────────────────────
+
+HOME = str(Path.home())
+
+HEARTBEAT_TOOLS = {"exec", "memory_search", "memory_get", "web_fetch", "session_status", "cron"}
+HEARTBEAT_MAX_CALLS = 8
+FILE_TOOLS = {"Read", "Write", "Edit"}
+
+
+def _path_to_project(path: str) -> str | None:
+    """Map an absolute file path to a human-readable project name."""
+    path = path.replace("~", HOME)
+
+    workspace_prefix = f"{HOME}/.openclaw/workspace"
+    if path.startswith(workspace_prefix):
+        return "workspace"
+
+    openclaw_prefix = f"{HOME}/.openclaw"
+    if path.startswith(openclaw_prefix):
+        return "openclaw"
+
+    work_prefix = f"{HOME}/work/"
+    if path.startswith(work_prefix):
+        rest = path[len(work_prefix):]
+        project = rest.split("/")[0]
+        return project if project else None
+
+    return None
+
+
+def _extract_paths_from_exec(command: str) -> list[str]:
+    """Extract file/directory paths from a shell command string."""
+    import re
+    # Match: ~/work/foo, ~/.openclaw/foo, /home/david/foo
+    patterns = [
+        r"~\/[\w./\-]+",
+        rf"{re.escape(HOME)}\/[\w./\-]+",
+    ]
+    results = []
+    for pattern in patterns:
+        results.extend(re.findall(pattern, command))
+    return results
+
+
+def get_session_cwd(jsonl_path: str) -> str | None:
+    """Read the cwd from the session header line (first 'type: session' record)."""
+    try:
+        with open(jsonl_path) as f:
+            for raw_line in f:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    record = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") == "session":
+                    return record.get("cwd")
+    except OSError:
+        pass
+    return None
+
+
+def extract_project(calls: list, cwd: str | None) -> str | None:
+    """
+    Infer the project being worked on from file paths in tool inputs and cwd.
+    Returns the most frequently referenced project name, or None.
+    """
+    from collections import Counter
+    counts: Counter = Counter()
+
+    for call in calls:
+        inp = call.get("input", {})
+
+        # File-editing tools: direct path
+        if call["name"] in FILE_TOOLS:
+            path = inp.get("path") or inp.get("file_path") or ""
+            project = _path_to_project(path)
+            if project:
+                counts[project] += 1
+
+        # Exec: extract paths from command string
+        if call["name"] == "exec":
+            command = inp.get("command", "")
+            for path in _extract_paths_from_exec(command):
+                project = _path_to_project(path)
+                if project:
+                    counts[project] += 1
+
+    if counts:
+        return counts.most_common(1)[0][0]
+
+    # Fall back to cwd
+    if cwd:
+        return _path_to_project(cwd)
+
+    return None
+
+
+def extract_search_queries(calls: list) -> list[str]:
+    """Extract and truncate web_search queries from tool call inputs."""
+    queries = []
+    for call in calls:
+        if call["name"] == "web_search":
+            q = call.get("input", {}).get("query", "")
+            if q:
+                queries.append(q[:40])
+        if len(queries) >= 3:
+            break
+    return queries
+
+
+def extract_exec_commands(calls: list) -> list[str]:
+    """Extract meaningful (non-trivial) exec commands, truncated."""
+    TRIVIAL = {"ls", "pwd", "echo", "sleep", "cat", "true", "false", "cd"}
+    commands = []
+    for call in calls:
+        if call["name"] != "exec":
+            continue
+        cmd = call.get("input", {}).get("command", "").strip()
+        if not cmd:
+            continue
+        first_word = cmd.split()[0].lstrip("./~").split("/")[-1] if cmd.split() else ""
+        if first_word in TRIVIAL and len(cmd.split()) == 1:
+            continue
+        commands.append(cmd[:60])
+        if len(commands) >= 2:
+            break
+    return commands
+
+
+def is_heartbeat(calls: list) -> bool:
+    """
+    Return True if the tool call pattern looks like a routine heartbeat check.
+
+    Heartbeat: small set of exec/memory/web_fetch calls, no file editing,
+    no web_search, no sessions_spawn, ≤ HEARTBEAT_MAX_CALLS total.
+    """
+    if not calls:
+        return False
+    if len(calls) > HEARTBEAT_MAX_CALLS:
+        return False
+    for call in calls:
+        name = call["name"]
+        if name not in HEARTBEAT_TOOLS:
+            return False
+    return True
+
+
+def apply_heartbeat_override(category: str, calls: list) -> str:
+    """Override category to 'heartbeat' if the call pattern matches."""
+    if is_heartbeat(calls):
+        return "heartbeat"
+    return category
+
+
+def build_tag_text(category: str, calls: list, cwd: str | None) -> str:
+    """
+    Compose a human-readable tag text from category, project, and context.
+
+    Examples:
+      coding | claw-monitor | CombinedChart.tsx, page.tsx
+      research | tailscale rename API, headscale tcd
+      heartbeat
+      conversation
+    """
+    if category in ("heartbeat", "idle", "conversation") and not calls:
+        return category
+
+    if category == "heartbeat":
+        return "heartbeat"
+
+    parts = [category]
+
+    project = extract_project(calls, cwd)
+    if project:
+        parts.append(project)
+
+    if category == "research":
+        queries = extract_search_queries(calls)
+        if queries:
+            parts.append(", ".join(queries))
+    elif category in ("coding", "agent"):
+        # Collect unique file basenames
+        filenames: list[str] = []
+        seen: set[str] = set()
+        for call in calls:
+            if call["name"] in FILE_TOOLS:
+                path = call.get("input", {}).get("path") or call.get("input", {}).get("file_path") or ""
+                basename = Path(path).name
+                if basename and basename not in seen:
+                    seen.add(basename)
+                    filenames.append(basename)
+            if len(filenames) >= 3:
+                break
+        if filenames:
+            parts.append(", ".join(filenames))
+
+    return " | ".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main Run Logic
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -396,8 +603,14 @@ def run(
     # Classify
     category = classify(calls, has_messages=has_messages)
 
+    # Apply heartbeat override
+    category = apply_heartbeat_override(category, calls)
+
     # Get current claw-monitor state
     last_category, last_tag_ts = get_last_tag(cm_port=cm_port)
+
+    # Get session cwd for context enrichment
+    cwd = get_session_cwd(jsonl_path) if jsonl_path else None
 
     log.info(
         "Window: %d tool calls | classified: %s | last tag: %s (%s)",
@@ -415,9 +628,11 @@ def run(
     # Compute backdate timestamp
     backdate_ts = get_backdate_ts(calls, category, last_tag_ts)
 
+    # Build enriched tag text
+    tag_text = build_tag_text(category, calls, cwd)
+
     # Fire the tag
-    tool_names = [c["name"] for c in calls]
-    post_tag(category, backdate_ts, tool_names, cm_port=cm_port, dry_run=dry_run)
+    post_tag(category, backdate_ts, tag_text=tag_text, cm_port=cm_port, dry_run=dry_run)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
