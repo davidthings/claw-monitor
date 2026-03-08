@@ -67,8 +67,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ data, count: data.length, resolution: "hourly" });
   }
 
-  // Raw — limit to prevent huge responses
-  sql += " LIMIT 10000";
   const data = db.prepare(sql).all(...args);
   return NextResponse.json({ data, count: data.length, resolution: "raw" });
 }
