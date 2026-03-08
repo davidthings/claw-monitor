@@ -180,7 +180,10 @@ export default function CombinedChart({ data, tags, rangeSeconds }: Props) {
             dataKey="ts"
             type="number"
             scale="time"
-            domain={[(dataMin: number) => dataMin, () => Math.floor(Date.now() / 1000)]}
+            domain={[
+              () => Math.floor(Date.now() / 1000) - rangeSeconds,
+              () => Math.floor(Date.now() / 1000),
+            ]}
             tickFormatter={formatTime}
             stroke="#888"
           />

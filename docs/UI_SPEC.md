@@ -148,7 +148,14 @@ The Overview page makes the following API calls on load, then subscribes to SSE 
 
 4. **Time range** — Selectable, using the **same range picker as the Metrics page** (e.g. Last 30m / 1h / 2h / 6h / 24h / custom). No hardcoded default — persist the last-used range in `localStorage`.
 
-5. **X-axis right edge — always pinned to now** — The chart's right boundary must always be the current time, not a rounded/snapped value. Recharts' `domain={["auto", "auto"]}` snaps to "nice" intervals and leaves a gap between the last data point and the visible right edge. The correct implementation pins the right domain bound to `Math.floor(Date.now() / 1000)` (recalculated each render): `domain={[(dataMin) => dataMin, () => Math.floor(Date.now() / 1000)]}`. This ensures the chart always ends at *right now*, tag markers near the right edge are never clipped, and the view advances naturally as data refreshes.
+5. **X-axis domain — fixed window anchored to now** — Both edges of the time axis must be derived from `Date.now()`, not from the data. Recharts' `domain={["auto", "auto"]}` snaps to "nice" intervals and auto-fits to the data range, causing the chart to drift and the right edge to end at a rounded future time. The correct implementation:
+   ```js
+   domain={[
+     () => Math.floor(Date.now() / 1000) - rangeSeconds,
+     () => Math.floor(Date.now() / 1000),
+   ]}
+   ```
+   This ensures: the chart always shows exactly the selected time window (e.g., last 2h), the right edge is always "right now", the left edge is always `now - range`, and tag markers near either edge are never clipped. Data gaps appear as genuine empty space — honest and correct. The `rangeSeconds` prop (already passed to the component) provides the window size.
 
 ---
 
